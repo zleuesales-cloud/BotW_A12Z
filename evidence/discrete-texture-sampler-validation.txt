@@ -1,0 +1,8 @@
+Discrete TEX/SAMPT checkpoint
+Executor: lunna_max (GPT-6 Luna, max); parent reviewed and reran GPU test.
+Command: TOTK_DISCRETE_MSL_DIR=/tmp/totk-abi-e2e/ios-metal-iphoneos-20261120 python3 -m unittest upstream.tests.test_discrete_texture_sampler_binding -v
+Result: 1 PASS on Mac GPU with actual generated title VS/PS; production native setters and tex_fast/samp_fast plus sampler descriptor.
+Checks independent texture/sampler slot0, sRGB/swizzle and nearest/linear pixels. Native paths avoid resource IDs.
+Invalid NVN registers >=128 and mismatched texture types fail explicitly; valid unbound handles retain upstream semantics.
+Executor reports final A12 object compile PASS (56 warnings), prior buffer and reflection checks pass.
+Not full encode_args replay or target device graphics validation; game draw/dispatch remain refused.

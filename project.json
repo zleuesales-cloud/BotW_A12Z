@@ -178,5 +178,22 @@
       "native indexed/indirect and compute binding",
       "target iPad execution"
     ]
+  },
+  "discrete_texture_sampler_binding": {
+    "status": "native TEX/SAMPT checkpoint implemented; game draw/dispatch still explicitly refused",
+    "validation": "parent reran true title VS/PS GPU helper test: pass; executor A12 compile pass",
+    "coverage": "native setters, tex_fast/samp_fast, sRGB, swizzle, nearest/linear; not full encode_args replay",
+    "remaining": [
+      "active stage-specific slot conflicts",
+      "native indexed/indirect binding",
+      "device rendering validation"
+    ]
+  },
+  "device_probe": {
+    "status": "same-ID update installed; first launch exited1 before probe pass, diagnosis pending",
+    "bundle_id": "org.macnativegames.botw.a12z",
+    "source_commit": "a8982c1",
+    "device": "00008027-001C51D12262402E",
+    "gpu_validation": "no pass result yet"
   }
 }

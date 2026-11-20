@@ -9455,7 +9455,7 @@ static void *tex_by_id_p(int tid) {   // 调用方持 g_rmu | Caller holds g_rmu
         v = stor_sampling_view(base,(MTLPixelFormat)pf,tt,NSMakeRange(l0,nl),NSMakeRange(s0,ns),vsw,pkg);
         if (!v) { RED_ONCE(11, "贴图视图建不出 id %d", tid); v = base; }
     }
-    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = v.gpuResourceID._impl; rp->view_tt = (uint8_t)v.textureType; rp->view_parent = (__bridge void *)v.parentTexture; rp->view_ser = sg; rp->view_pkg = treg_kind(&rp->t); rp->view_dirty = rp->view_pkg == 2 || (rp->view_pkg == 1 && tex_check_once()) ? g_sub_serial : dg;
+    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = g_present_apple5 ? 0 : v.gpuResourceID._impl; rp->view_tt = (uint8_t)v.textureType; rp->view_parent = (__bridge void *)v.parentTexture; rp->view_ser = sg; rp->view_pkg = treg_kind(&rp->t); rp->view_dirty = rp->view_pkg == 2 || (rp->view_pkg == 1 && tex_check_once()) ? g_sub_serial : dg;
     treg_link_locked(tid);
     return rp->view;
 }
@@ -9646,7 +9646,7 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // 调用方持 g_rmu | Calle
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "采样器号 %d 未登记", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
     id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:samp_desc(g_sreg[sid])];
-    if (s) { g_sview[sid] = (void *)CFBridgingRetain(s); g_srid[sid] = s.gpuResourceID._impl; }
+    if (s) { g_sview[sid] = (void *)CFBridgingRetain(s); g_srid[sid] = g_present_apple5 ? 0 : s.gpuResourceID._impl; }
     return s;
 }
 #ifdef GAME_OOT
@@ -12924,7 +12924,7 @@ static id<MTLTexture> dummy_tex(int dtt, int dpf) {
     t = [g_dev newTextureWithDescriptor:d];   // 共享存储新建即全零 | Shared storage is all zeros when newly created
     if (pf != MTLPixelFormatDepth32Float) { uint8_t z[64] = {0}; NSUInteger faces = tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1;
         for (NSUInteger f = 0; f < faces; f++) [t replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:f withBytes:z bytesPerRow:16 bytesPerImage:16]; }
-    cache[dtt & 7][dpf & 3] = t; g_dummy_tex_rid[dtt & 7][dpf & 3] = t.gpuResourceID._impl; res_add(t);
+    cache[dtt & 7][dpf & 3] = t; g_dummy_tex_rid[dtt & 7][dpf & 3] = g_present_apple5 ? 0 : t.gpuResourceID._impl; res_add(t);
     return t;
 }
 // 未绑图像槽的写入汇：与读出 0 的哑贴图分开（写入不得污染它们），同类型同像素类共用一张
@@ -13438,6 +13438,30 @@ static void discrete_bind_buffer(id<MTLCommandEncoder> en, int nvn_stage, const 
     if (nvn_stage == 0) [render setVertexBuffer:buffer offset:offset atIndex:binding->metal_slot];
     else if (nvn_stage == 1) [render setFragmentBuffer:buffer offset:offset atIndex:binding->metal_slot];
     else MDIE("discrete buffer binding stage %d is not a native render stage", nvn_stage);
+}
+static void discrete_bind_texture(id<MTLCommandEncoder> en, int nvn_stage, const nvn_rbind *binding,
+                                  id<MTLTexture> texture) {
+    if (!en || !binding || binding->kind != NVN_RB_TEX || binding->metal_class != NVN_METAL_CLASS_TEXTURE ||
+        binding->metal_slot >= 96 || !texture)
+        MDIE("invalid discrete texture binding: stage %d kind %u class %u slot %u texture %p",
+             nvn_stage, binding ? binding->kind : 0, binding ? binding->metal_class : 0,
+             binding ? binding->metal_slot : 0, (__bridge void *)texture);
+    id<MTLRenderCommandEncoder> render = (id<MTLRenderCommandEncoder>)en;
+    if (nvn_stage == 0) [render setVertexTexture:texture atIndex:binding->metal_slot];
+    else if (nvn_stage == 1) [render setFragmentTexture:texture atIndex:binding->metal_slot];
+    else MDIE("discrete texture binding stage %d is not a native render stage", nvn_stage);
+}
+static void discrete_bind_sampler(id<MTLCommandEncoder> en, int nvn_stage, const nvn_rbind *binding,
+                                  id<MTLSamplerState> sampler) {
+    if (!en || !binding || binding->kind != NVN_RB_SAMPT || binding->metal_class != NVN_METAL_CLASS_SAMPLER ||
+        binding->metal_slot >= 16 || !sampler)
+        MDIE("invalid discrete sampler binding: stage %d kind %u class %u slot %u sampler %p",
+             nvn_stage, binding ? binding->kind : 0, binding ? binding->metal_class : 0,
+             binding ? binding->metal_slot : 0, (__bridge void *)sampler);
+    id<MTLRenderCommandEncoder> render = (id<MTLRenderCommandEncoder>)en;
+    if (nvn_stage == 0) [render setVertexSamplerState:sampler atIndex:binding->metal_slot];
+    else if (nvn_stage == 1) [render setFragmentSamplerState:sampler atIndex:binding->metal_slot];
+    else MDIE("discrete sampler binding stage %d is not a native render stage", nvn_stage);
 }
 // B 路线的静态常量缓冲：Ryujinx support_buffer（布局见 Ryujinx.Graphics.Shader/SupportBuffer.cs：alpha_test u32、is_bgra u32[8]、
 // viewport_inverse f4、viewport_size f4、frag_scale_count i32、render_scale f32[73]…，各字段按 16 字节对齐）与全 0 驱动常量段（64 KB = 着色器声明的上限）
@@ -14688,8 +14712,10 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
         int reg = b->reg, aid = b->aid;
-        if (discrete && b->kind != NVN_RB_CBUF && b->kind != NVN_RB_C1)
-            MDIE("discrete shader %s binding kind %u is outside the CBUF/C1 checkpoint", sh->key, b->kind);
+        if (discrete && b->kind != NVN_RB_CBUF && b->kind != NVN_RB_C1 && b->kind != NVN_RB_TEX && b->kind != NVN_RB_SAMPT)
+            MDIE("discrete shader %s binding kind %u is outside the CBUF/C1/TEX/SAMPT checkpoint", sh->key, b->kind);
+        if (discrete && (b->kind == NVN_RB_TEX || b->kind == NVN_RB_SAMPT) && reg >= 128)
+            MDIE("discrete shader %s texture/sampler NVN register %d exceeds the supported handle table", sh->key, reg);
         if (slot_mode && tex_slot_binding(b)) {
             // A preceding miss may create/replace a resource, or a guest write
             // may arrive since the initial key. Then finish this block normally.
@@ -14795,8 +14821,13 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             }
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT) {   // SAMPT：合并句柄（贴图号 | 采样器号 << 20）的采样器部分 | SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20)
+            if (discrete && b->kind != NVN_RB_SAMPT) MDIE("discrete shader %s uses unsupported standalone sampler binding", sh->key);
             int sid = reg < 128 ? (int)((b->kind == NVN_RB_SAMPT ? S.tex[nvn_stage][reg] : S.samp[nvn_stage][reg]) >> 20) : 0;
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
+            if (discrete) {
+                if (sid && !ss) MDIE("discrete shader %s sampler id %d could not resolve to a native state", sh->key, sid);
+                id<MTLSamplerState> state = ss ? ss : dummy_samp(); discrete_bind_sampler(en, nvn_stage, b, state); USE(state, MTLResourceUsageRead); continue;
+            }
             slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
 #ifdef GAME_OOT
             if (ss && slot_reads_depth(sh, b, S.tex[nvn_stage][reg])) { void *dv = NULL; uint64_t drid = samp_depth_read(sid, &dv); if (drid) { slots[aid] = drid; ss = (__bridge id<MTLSamplerState>)dv; } }
@@ -14806,7 +14837,10 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d cmp=%d/%d wrap=%d,%d,%d lod=%g..%g（0 最近点 / 1 双线性；2–5 带 mip）", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf, (int)sp.cmp_mode, (int)sp.cmp_func, (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.lod_min, sp.lod_max); }
         } else if (b->kind == NVN_RB_TEX) {
             int tid = reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
-            void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+            void *tv = NULL; uint64_t trid = 0;
+            if (tid) { if (discrete) tv = tex_fast(tid); else trid = tex_fast_rid(tid, &tv); }
+            __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+            if (discrete && tid && !t) MDIE("discrete shader %s texture id %d could not resolve to a native texture view", sh->key, tid);
             if (nvn_stage == 1 && reg == 0 && !strncmp(sh->key, "0ac9a54938974396", 16) && getenv("DM_NVN_FLASHHDR")) g_flash_hdr_source = t;
             if (g_eye_pass == 1 && g_eseg_n && t && tid < g_ntreg) eseg_tex(EKEY(&g_treg[tid].t));   // stereo replay: what this segment samples
             if (t && tid < g_ntreg) use_rec("tex", (uint64_t)g_treg[tid].t.mem, g_treg[tid].t.L.size, tid, &g_treg[tid].t);
@@ -14830,15 +14864,23 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
                     tid < g_ntreg ? (void *)g_treg[tid].t.mem : NULL, tid < g_ntreg ? (unsigned long long)g_treg[tid].t.L.size : 0ull, tid < g_ntreg ? g_treg[tid].t.d.flags : 0u,
                     tid < g_ntreg ? g_treg[tid].t.d.levels : 0u, (__bridge void *)t, (__bridge void *)t.parentTexture);
             }
-            if (t && b->fetch && tex_keep_full(tid)) { tv = NULL; trid = tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv; }   // full size for integer reads
-            if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; }
+            if (t && b->fetch && tex_keep_full(tid)) { tv = NULL; if (discrete) tv = tex_fast(tid); else trid = tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv; }   // full size for integer reads
+            if (!t) { t = dummy_tex(b->dtt, b->dpf); if (!discrete) trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; }
             else if ((b->dtt == MTLTextureType2DArray && treg_view_type(tid, t) == MTLTextureType2D) || (b->dtt == MTLTextureType2D && treg_view_type(tid, t) == MTLTextureType2DArray)) {
                 /* TOTK: the shader indexes a 2D texture as a 2D array (the UI glyph atlas: NVN clamps the layer to 0) or the reverse;
                    Metal needs a matching texture type in the argument buffer, so bind a cached 1-slice view of the right type. */
                 id<MTLTexture> av = tex_type_view(t, (MTLTextureType)b->dtt);
-                if (av) { t = av; trid = av.gpuResourceID._impl; } }
-            if (t && tid && tid < g_ntreg && R.has_rt) { id<MTLTexture> mv = mip_feedback_view(t, g_treg[tid].t.serial, sh, reg, b->fetch ? 0 : (int)(S.tex[nvn_stage][reg] >> 20)); /* a slot the shader also reads by integer texel coordinates (read(..., 0)) keeps every level below: a one-level view would move its level 0 */ if (mv) { t = mv; trid = mv.gpuResourceID._impl; } }
-            if (g_mfxup_out && (__bridge void *)sh == (__bridge void *)g_mfxup_sh && t == g_mfxup_src) { t = g_mfxup_out; trid = t.gpuResourceID._impl; }   // TOTK_MFX_UPSCALE
+                if (av) { t = av; if (!discrete) trid = av.gpuResourceID._impl; }
+                else if (discrete) MDIE("discrete shader %s texture slot %u needs an unavailable texture type view", sh->key, b->metal_slot); }
+            if (t && tid && tid < g_ntreg && R.has_rt) { id<MTLTexture> mv = mip_feedback_view(t, g_treg[tid].t.serial, sh, reg, b->fetch ? 0 : (int)(S.tex[nvn_stage][reg] >> 20)); /* a slot the shader also reads by integer texel coordinates (read(..., 0)) keeps every level below: a one-level view would move its level 0 */ if (mv) { t = mv; if (!discrete) trid = mv.gpuResourceID._impl; } }
+            if (g_mfxup_out && (__bridge void *)sh == (__bridge void *)g_mfxup_sh && t == g_mfxup_src) {
+                if (discrete) MDIE("discrete shader %s requires an unsupported MetalFX output texture", sh->key);
+                t = g_mfxup_out; trid = t.gpuResourceID._impl;
+            }   // TOTK_MFX_UPSCALE
+            if (discrete && t.textureType != (MTLTextureType)b->dtt)
+                MDIE("discrete shader %s texture slot %u resolved type %lu, expected %u", sh->key, b->metal_slot,
+                     (unsigned long)t.textureType, b->dtt);
+            if (discrete) { discrete_bind_texture(en, nvn_stage, b, t); USE(t, MTLResourceUsageRead); continue; }
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_IMG) {   // 可写贴图：NVN 图像槽 r（BindImages）↔ D3D u_r | Writable texture: NVN image slot r (BindImages) ↔ D3D u_r
