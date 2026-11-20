@@ -154,5 +154,18 @@
       "55 compile warnings remain",
       "not installed or validated on target iPad"
     ]
+  },
+  "ios_app_build": {
+    "status": "compile and link passed; unsigned app lacks complete game package; not installed",
+    "source_commit": "5d947aa63e40f1d39f5fdf2f9a9b486b227d70a5",
+    "binary_sha256": "7c4a77b0b997681f4c885e115c97b09cb1ecf43cf1d42fdefb2c2174ad92c2f1",
+    "external_manifest": "/tmp/botw-ios-app-v3/compile-link-manifest.json",
+    "manifest_sha256": "9cccd4496cbf4c2e28b1c8325f9e1cf57db4fb5ed7869c75a7bc1b8ccb1734c9",
+    "limitations": [
+      "game runtime behavior untested",
+      "recorded rewriter hash differs; compatibility audit pending",
+      "discrete binder incomplete",
+      "not signed or installed"
+    ]
   }
 }

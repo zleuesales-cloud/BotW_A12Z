@@ -1,0 +1,12 @@
+Full iOS App compile/link checkpoint
+Executor: lunna_shader_audit (GPT-6 Luna, max); parent checked final BUILD SUCCEEDED and executable SHA256.
+Frozen source commit: 5d947aa63e40f1d39f5fdf2f9a9b486b227d70a5
+App: /tmp/botw-ios-app-v3/build-tree-5d947aa/build/ios-derived-final/Build/Products/Release-iphoneos/TOTK.app
+Binary SHA256: 7c4a77b0b997681f4c885e115c97b09cb1ecf43cf1d42fdefb2c2174ad92c2f1
+External manifest: /tmp/botw-ios-app-v3/compile-link-manifest.json
+Manifest SHA256: 9cccd4496cbf4c2e28b1c8325f9e1cf57db4fb5ed7869c75a7bc1b8ccb1734c9
+Build fixes were staging-only: materialized tracked third_party source, staged include/library paths, merged NativeAOT raw archive with 12 exact iOS 10.0.14 runtime archives using production publisher recipe.
+Runtime table format/version and all three module size/hash records match; four temporary embed layout fields derived from these records, no guessed offsets.
+Recorded rewriter hash differs from current source; runtime compatibility remains under audit.
+Unsigned build-only product: no complete GameData/shader/ROMFS package; no install/launch; no gameplay/FPS claim.
+Existing device App, saves and unique 15GB content untouched.
