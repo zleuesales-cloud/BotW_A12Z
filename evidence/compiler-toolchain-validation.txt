@@ -1,0 +1,10 @@
+Compiler toolchain checkpoint
+Executor: lunna_shader_audit (requested GPT-6 Luna, max)
+Pinned SDK: .NET 10.0.403, runtime / NativeAOT 10.0.14
+Dependency owner: upstream/tools/deps/pins.py
+Isolated cache: /tmp/totk-xlate-deps
+Reported clean NativeAOT artifact: /tmp/totk-abi-from-pinned-tools-deps/totk_xlate
+SDK resolution: MNG_DEPS_CACHE=/tmp/totk-xlate-deps python3 upstream/tools/deps program dotnet
+Rebuild reported successful; NU1903 absent, existing trimming warnings remain.
+Reason: GHSA-p3jp-9v83-76w9 fixes require rebuilding statically linked NativeAOT output.
+This checkpoint does not validate iPad gameplay or the pending discrete runtime consumer.

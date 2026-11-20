@@ -12,7 +12,11 @@
 set -e
 HERE=${0:A:h}
 REPO=${HERE:h:h:h:h}
-DOTNET=${1:-dotnet}
+PINNED_DOTNET_VERSION=10.0.403
+DOTNET=${1:-$(python3 "$REPO/tools/deps" program dotnet)}
+DOTNET_VERSION=$("$DOTNET" --version)
+[[ $DOTNET_VERSION == $PINNED_DOTNET_VERSION ]] || { echo "TOTK NativeAOT compiler requires .NET SDK $PINNED_DOTNET_VERSION (got $DOTNET_VERSION)"; exit 1; }
+export DOTNET_ROOT=${DOTNET:A:h}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
 mkdir -p "$WORK/ryujinx-src" "$WORK/xlate"

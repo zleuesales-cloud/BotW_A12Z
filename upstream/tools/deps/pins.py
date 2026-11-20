@@ -30,11 +30,12 @@ SOURCES = {
     # XcodeGen (the iPhone / iPad Xcode project): the release zip, a universal binary; the digest is GitHub's for the asset.
     'xcodegen': ('2.46.0', 'https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip',
                  '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806'),
-    # The .NET SDK (nxnative's dmsh_xlate runs on it, nx_extract is built with it): Microsoft's tarball, SHA-512 from
-    # builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json.
-    'dotnet': ('10.0.401', 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-osx-arm64.tar.gz',
-               '69f64eb00dc045398755c440b152225d544301a345a146a16e86a56a0c52b7c94b2c331520e976dbb821f18d31930aafbd25bb85961e3517e0665414ce0cbcff'),
+    # The .NET SDK (NativeAOT compilers and extractors): Microsoft SDK 10.0.403 includes runtime 10.0.14 and fixes
+    # GHSA-p3jp-9v83-76w9 / CVE-2026-111497; URL and SHA-512 are from Microsoft's 10.0 release metadata.
+    'dotnet': ('10.0.403', 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.403/dotnet-sdk-10.0.403-osx-arm64.tar.gz',
+               '5893c66b48ea3674c7da18501059d606e96f3672fabe4d5e41762e692c7c83df3ee0b2b9dc5a0786191da2dc413d7335158101c14c935ab217f31ac2529770f3'),
 }
+
 
 PACKAGES = {
     'libhac': ('libhac.0.19.0.nupkg', 'https://api.nuget.org/v3-flatcontainer/libhac/0.19.0/libhac.0.19.0.nupkg',

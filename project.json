@@ -105,5 +105,12 @@
     "ios_compile": "arm64-apple-ios26.0 -mcpu=apple-a12; nvn_mtl.m object",
     "object_sha256": "cdbe24940653125b481b20d77e98849b846324fa49aa9fd47597cf057bbfed6a",
     "target_device_gameplay": "not tested"
+  },
+  "compiler_toolchain": {
+    "dotnet_sdk": "10.0.403",
+    "nativeaot_runtime": "10.0.14",
+    "spirv_cross_commit": "aa217aeb6c9f0ace7a0ab233b28807edf45eb165",
+    "dependency_owner": "upstream/tools/deps/pins.py",
+    "status": "pinned NativeAOT rebuild passed per Luna; shader ABI review in progress"
   }
 }
