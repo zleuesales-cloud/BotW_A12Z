@@ -167,5 +167,16 @@
       "not signed or installed"
     ],
     "module_compatibility": "all three patched module hashes match current expected-v1.9.0.json pinned baseline; production reuse policy accepts older rewriter metadata"
+  },
+  "discrete_buffer_binding": {
+    "status": "CBUF/C1 typed binding checkpoint implemented; game draw/dispatch remain disabled with explicit error",
+    "validation": "parent reran actual title VS production setter GPU test: pass; executor A12 compile and ABI test pass",
+    "coverage": "native buffer slots and nonzero offset pixel output; full encode_args snapshot/rename path not exercised",
+    "remaining": [
+      "texture/sampler binding",
+      "active vertex/layer/HDR buffer slot collision checks",
+      "native indexed/indirect and compute binding",
+      "target iPad execution"
+    ]
   }
 }

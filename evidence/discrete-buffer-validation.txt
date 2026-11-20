@@ -1,0 +1,10 @@
+Discrete CBUF/C1 checkpoint
+Implementer: lunna_max (GPT-6 Luna, max); parent reviewed and reran GPU test.
+Command: TOTK_DISCRETE_MSL_DIR=/tmp/totk-abi-e2e/ios-metal-iphoneos-20261120 python3 -m unittest upstream.tests.test_discrete_buffer_binding -v
+Result: 1 PASS on Mac GPU, actual BOTW title vertex MSL (6073 prefix), CBUF slot0 and C1 slot1 at offset256; C1 affects pixel output.
+Typed snapshot/update-shadow records retain arena buffer identity and offset; Apple5 avoids GPU addresses and raw AB cache/ArgumentEncoder.
+Executor reports iOS/A12 nvn_mtl.m compile PASS (56 warnings), binding ABI test PASS, diff check clean.
+GPU test covers production buffer setter plus real shader, not full encode_args snapshot/rename selection.
+Slot validation checks namespace limits and duplicates; active vertex/layer/HDR resource collisions remain to be checked before game draw activation.
+Texture/sampler and remaining resource kinds not enabled; game draw/dispatch still fail explicitly.
+No iPad install or gameplay validation.
