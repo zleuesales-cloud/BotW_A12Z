@@ -10,3 +10,10 @@ Prior selected production translations: 16/26 legacy title variants available; A
 Direct and AB driver reads preserved; sampler slots not merged or truncated.
 Runtime parser remains rejecting discrete-v1 until matching native binder is integrated.
 No iPad gameplay validation; generated shaders and game inputs excluded from Git.
+
+Follow-up offline iOS check (Luna): 16/16 distinct libraries compiled, 9 VS + 7 PS; 0 cache reuse.
+Production compile_seed.py flags: -fmetal-math-mode=safe -mtargetos=ios26.0; Xcode27.2 / iphoneos SDK27.2.
+Artifact root: /tmp/totk-abi-e2e/ios-metal-iphoneos-20261120
+Seed manifest SHA256: 7a9d06bf1acfcb39d3f9455dba5300015676a6116e7fcaaa5f09307a95ddf05c
+Library-set SHA256: dcf62a275832c7bd8c2526d468b5ffe2ae41d98804851cdf21606f387408fb55
+Not Family5 GPU lowering/execution validation. Chain remains totk-native-v9-unverified.

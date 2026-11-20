@@ -123,7 +123,13 @@
     "legacy_title_variants_missing": 10,
     "tests": "3 seed tests, reflection regression and legacy/new native exports passed; selected AB parity and inproc/process parity reported by Luna",
     "limits": "buffer31 texture96 sampler16; geometry/capture explicitly rejected in discrete mode",
-    "device_gameplay": "not tested"
+    "device_gameplay": "not tested",
+    "ios_offline_compile": {
+      "result": "16/16 pass; 9 VS + 7 PS",
+      "scope": "offline compile/link only, not Family5 GPU execution",
+      "artifact_directory": "/tmp/totk-abi-e2e/ios-metal-iphoneos-20261120",
+      "library_set_sha256": "dcf62a275832c7bd8c2526d468b5ffe2ae41d98804851cdf21606f387408fb55"
+    }
   },
   "shader_runtime_abi": {
     "status": "service/cache ABI isolation implemented; renderer setter not activated",
