@@ -1,0 +1,9 @@
+discrete-v1 reflection checkpoint
+Executor: lunna_shader_audit (GPT-6 Luna, max); parent reviewed and reran focused parser test.
+Command: python3 -m unittest upstream.tests.test_binding_abi -v
+Result: PASS, production nvn_refl.m compiled and executed without GPU submission.
+Covers legacy omitted/explicit AB, historical integral float arg_id, opt-in discrete marker/class/slot, cross-class same slot, duplicate/range/malformed metadata rejection and semantic metadata preservation.
+Default parser remains AB-only. Explicit mode is available to the loader only behind matching binder guard.
+No whole-structure serialization or memcpy/sizeof dependency found by executor audit.
+Full 15,525 legacy reflection corpus was not rerun at this checkpoint.
+No native binder or iPad gameplay validation in this commit.

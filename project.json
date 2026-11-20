@@ -67,7 +67,8 @@
       "legacy omitted",
       "ab"
     ],
-    "discrete_binding": "rejected explicitly until the matching binding path is implemented"
+    "discrete_binding": "explicit opt-in parser implemented; default parser remains AB-only; native binder not active",
+    "latest_parser_test": "pass: parent verified AB compatibility and opt-in discrete validation fixture; full legacy corpus not rerun after this change"
   },
   "gpu_submission": {
     "status": "shared completion and classic submission integrated; game command creation and encoders not migrated",

@@ -3,6 +3,8 @@
 #import "nvn_refl.h"
 #include "nvn_obj.h"
 #import <Metal/Metal.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -30,30 +32,98 @@ static int refl_rw(NSDictionary *b) {
     NSString *t = b[@"msl_type"]; if (![t isKindOfClass:[NSString class]]) return 0;
     return [t containsString:@"access::write"] || [t containsString:@"access::read_write"];
 }
-int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
+static int refl_integer(id value, int lo, int hi, int *out) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() ||
+        CFNumberIsFloatType((__bridge CFNumberRef)value)) return 0;
+    double x = [value doubleValue];
+    if (!isfinite(x) || x < lo || x > hi || x != (int)x) return 0;
+    *out = (int)x; return 1;
+}
+static uint8_t refl_metal_class(id value) {
+    if (![value isKindOfClass:NSString.class]) return NVN_METAL_CLASS_NONE;
+    if ([value isEqualToString:@"buffer"]) return NVN_METAL_CLASS_BUFFER;
+    if ([value isEqualToString:@"texture"]) return NVN_METAL_CLASS_TEXTURE;
+    if ([value isEqualToString:@"sampler"]) return NVN_METAL_CLASS_SAMPLER;
+    return NVN_METAL_CLASS_NONE;
+}
+static uint8_t refl_kind_metal_class(NSString *kind) {
+    if ([kind isEqualToString:@"cbuf"] || [kind isEqualToString:@"sbuf"] || [kind isEqualToString:@"sbuf_ubo"] ||
+        [kind isEqualToString:@"ubo_ptr"] || [kind isEqualToString:@"drvcb"] || [kind isEqualToString:@"c1"] ||
+        [kind isEqualToString:@"support"] || [kind isEqualToString:@"geometry"] || [kind isEqualToString:@"gmem_map"] ||
+        [kind isEqualToString:@"gmem_log"] || [kind isEqualToString:@"texpool"] || [kind isEqualToString:@"samppool"])
+        return NVN_METAL_CLASS_BUFFER;
+    if ([kind isEqualToString:@"tex"] || [kind isEqualToString:@"img"] || [kind isEqualToString:@"tbuf"])
+        return NVN_METAL_CLASS_TEXTURE;
+    if ([kind isEqualToString:@"samp"] || [kind isEqualToString:@"samp_tex"])
+        return NVN_METAL_CLASS_SAMPLER;
+    return NVN_METAL_CLASS_NONE;
+}
+static int refl_msl_type_matches_class(NSString *type, uint8_t cls) {
+    if (![type isKindOfClass:NSString.class] || !type.length) return 0;
+    switch (cls) {
+    case NVN_METAL_CLASS_BUFFER: return ![type hasPrefix:@"texture"] && ![type hasPrefix:@"depth"] && ![type hasPrefix:@"sampler"];
+    case NVN_METAL_CLASS_TEXTURE: return [type hasPrefix:@"texture"] || [type hasPrefix:@"depth"];
+    case NVN_METAL_CLASS_SAMPLER: return [type hasPrefix:@"sampler"];
+    default: return 0;
+    }
+}
+int nvn_refl_from_json_mode(NSDictionary *j, nvn_refl *o, int allow_discrete, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     #define FAIL(...) do { free(o->c1); o->c1 = NULL; o->c1_len = 0; o->has_c1 = 0; snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
     if (![j isKindOfClass:[NSDictionary class]]) FAIL("reflection must be an object");
     // Legacy caches omit bind_model; discrete layouts must never enter the raw argument-block path.
     id model = j[@"bind_model"];
-    if (model && ![model isEqual:@"ab"]) FAIL("unsupported binding ABI: %s", [[model description] UTF8String]);
+    if (!model || [model isEqual:@"ab"]) o->binding_model = NVN_BIND_MODEL_AB;
+    else if ([model isEqual:@"discrete-v1"] && allow_discrete) o->binding_model = NVN_BIND_MODEL_DISCRETE_V1;
+    else FAIL("unsupported binding ABI: %s", [[model description] UTF8String]);
     if (![j[@"route"] isEqual:@"B"]) FAIL("不是 B 反射（route ≠ B；A 路线 / PC 链反射已退役）");
     {   // Switch 原版翻译：种类与 NVN 槽号已由 dmsh_build.py 从 MSL 成员名解出 | Translated original Switch shaders: kind and NVN slot number are already parsed from the MSL member names by dmsh_build.py
         NSArray *bs = j[@"bindings"];
         if (![bs isKindOfClass:[NSArray class]]) FAIL("缺 bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("绑定 %lu 个，超上限 %d", (unsigned long)bs.count, NVN_REFL_MAXB);
-        o->route_b = 1; o->abi = 0;   // spirv-cross 第 0 组 → [[buffer(0)]] | spirv-cross set 0 → [[buffer(0)]]
-        uint8_t seen[NVN_REFL_MAXB] = {0};
+        o->route_b = 1; o->abi = o->binding_model == NVN_BIND_MODEL_AB ? 0 : -1;   // AB set 0 → [[buffer(0)]]; discrete has no argument-buffer slot
+        uint8_t seen[NVN_REFL_MAXB] = {0}, seen_metal[3][96] = {{0}};
         for (NSDictionary *b in bs) {
             if (![b isKindOfClass:[NSDictionary class]]) FAIL("binding must be an object");
-            id arg = b[@"arg_id"];
-            if (![arg isKindOfClass:[NSNumber class]] || [arg doubleValue] < 0 ||
-                [arg doubleValue] >= NVN_REFL_MAXB || [arg doubleValue] != [arg intValue])
-                FAIL("invalid argument ID: %s", [[arg description] UTF8String]);
-            NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
-            id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
-            if (seen[aid]++) FAIL("duplicate argument ID %d", aid);
-            r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
+            nvn_rbind *r = &o->b[o->nb];
+            int aid = -1, reg = -1;
+            if (o->binding_model == NVN_BIND_MODEL_AB) {
+                id arg = b[@"arg_id"];
+                if (![arg isKindOfClass:[NSNumber class]] || [arg doubleValue] < 0 ||
+                    [arg doubleValue] >= NVN_REFL_MAXB || [arg doubleValue] != [arg intValue])
+                    FAIL("invalid argument ID: %s", [[arg description] UTF8String]);
+                aid = [arg intValue];
+                if (seen[aid]++) FAIL("duplicate argument ID %d", aid);
+            } else {
+                uint8_t cls = refl_metal_class(b[@"metal_class"]); int slot = -1;
+                if (cls == NVN_METAL_CLASS_NONE) FAIL("invalid discrete Metal class: %s", [[b[@"metal_class"] description] UTF8String]);
+                int limit = cls == NVN_METAL_CLASS_BUFFER ? 31 : cls == NVN_METAL_CLASS_TEXTURE ? 96 : 16;
+                if (!refl_integer(b[@"metal_slot"], 0, limit - 1, &slot))
+                    FAIL("invalid discrete Metal slot for class %u: %s", cls, [[b[@"metal_slot"] description] UTF8String]);
+                if (seen_metal[cls - 1][slot]++) FAIL("duplicate discrete Metal class %u slot %d", cls, slot);
+                if (![b[@"msl_name"] isKindOfClass:NSString.class] || ![b[@"msl_name"] length])
+                    FAIL("missing discrete MSL resource name");
+                r->metal_class = cls; r->metal_slot = (uint8_t)slot;
+                if (!refl_msl_type_matches_class(b[@"msl_type"], cls))
+                    FAIL("discrete Metal class %u does not match MSL type for %s", cls, [b[@"msl_name"] UTF8String] ?: "?");
+            }
+            NSString *k = b[@"kind"];
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 && ![k isKindOfClass:NSString.class])
+                FAIL("missing or invalid discrete NVN kind");
+            int discrete_bank = -1, discrete_off = -1;
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 && [k isEqualToString:@"drvcb"] &&
+                (!refl_integer(b[@"bank"], 0, NVN_PUSH_BANK, &discrete_bank) ||
+                 (discrete_bank != 0 && discrete_bank != 2 && discrete_bank != NVN_PUSH_BANK)))
+                FAIL("invalid discrete driver bank: %s", [[b[@"bank"] description] UTF8String]);
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 && [k isEqualToString:@"sbuf_ubo"] &&
+                !refl_integer(b[@"off"], 0, UINT16_MAX, &discrete_off))
+                FAIL("invalid discrete storage-buffer offset: %s", [[b[@"off"] description] UTF8String]);
+            id rg = b[@"reg"];
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 && rg && rg != NSNull.null && !refl_integer(rg, 0, UINT16_MAX, &reg))
+                FAIL("invalid discrete NVN register: %s", [[rg description] UTF8String]);
+            else if ([rg isKindOfClass:[NSNumber class]]) reg = [rg intValue];
+            if (o->binding_model == NVN_BIND_MODEL_AB) reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1;
+            r->aid = aid < 0 ? 0 : (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             if ([k isEqualToString:@"cbuf"]) r->kind = NVN_RB_CBUF;
             else if ([k isEqualToString:@"samp"]) r->kind = NVN_RB_SAMP;
             else if ([k isEqualToString:@"samp_tex"]) r->kind = NVN_RB_SAMPT;
@@ -62,11 +132,11 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@"tbuf"]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@"sbuf"]) { r->kind = NVN_RB_SBUFP; r->rw = refl_rw(b); }
             else if ([k isEqualToString:@"ubo_ptr"]) r->kind = NVN_RB_UBOP;
-            else if ([k isEqualToString:@"sbuf_ubo"]) { r->kind = NVN_RB_SBUFU; r->rw = refl_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
+            else if ([k isEqualToString:@"sbuf_ubo"]) { r->kind = NVN_RB_SBUFU; r->rw = refl_rw(b); r->off = (uint16_t)(o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 ? discrete_off : [b[@"off"] intValue]); }
             else if ([k isEqualToString:@"support"]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@"c1"]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@"drvcb"]) {
-                int bank = [b[@"bank"] intValue];
+                int bank = o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 ? discrete_bank : [b[@"bank"] intValue];
                 /* NVN2 bank 24 holds pushed constants, not synthesized driver data; only banks 0 and 2 are driver data. */
                 if (bank == NVN_PUSH_BANK) { r->kind = NVN_RB_CBUF; r->reg = reg = NVN_PUSH_BANK; }
                 else if (bank == 0 || bank == 2) r->kind = bank == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
@@ -78,6 +148,12 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@"geometry"]) { r->kind = NVN_RB_GEO; if (reg < 0 || reg > 4) FAIL("geometry helper %s: reg %d", [b[@"msl_name"] UTF8String], reg); }
             else if ([k isEqualToString:@"gmem_log"]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
             else FAIL("B 绑定种类 %s 未实现（%s）", k.UTF8String, [b[@"msl_name"] UTF8String]);
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 && refl_kind_metal_class(k) != r->metal_class)
+                FAIL("discrete Metal class %u does not match NVN kind %s for %s", r->metal_class, k.UTF8String, [b[@"msl_name"] UTF8String] ?: "?");
+            if (o->binding_model == NVN_BIND_MODEL_DISCRETE_V1 &&
+                (r->kind == NVN_RB_SBUFU || r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT ||
+                 r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP) &&
+                (reg < 0 || reg > UINT16_MAX)) FAIL("missing or invalid NVN register for discrete binding %s", [b[@"msl_name"] UTF8String]);
 #ifdef GAME_NS2
             /* Global memory at an address the shader loaded from memory (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd
                resets the terrain's indirect draw records through such pointers; until 2026-11-03 bound to the empty buffer, so the
@@ -141,4 +217,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         return 0;
     }
     #undef FAIL
+}
+
+int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
+    return nvn_refl_from_json_mode(j, o, 0, err, errlen);
 }
