@@ -1,0 +1,87 @@
+{
+  "status": "pass",
+  "version": "botw190",
+  "image": "/Applications/Breath of the Wild.app/Contents/Resources/totk/rewritten/botw190/main.patched.bin",
+  "data_page": "0x20a8000",
+  "patched": [
+    {
+      "hz": 30,
+      "ratio": 1.0,
+      "delta_frames": 1.0,
+      "delta_time_ms": 33.33333507180214,
+      "fade_step": 0.20000000298023224,
+      "ui_step": 1.0,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 60,
+      "ratio": 0.5,
+      "delta_frames": 0.5,
+      "delta_time_ms": 16.66666753590107,
+      "fade_step": 0.10000000149011612,
+      "ui_step": 0.5,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 95,
+      "ratio": 0.31578946113586426,
+      "delta_frames": 0.31578946113586426,
+      "delta_time_ms": 10.526316240429878,
+      "fade_step": 0.06315789371728897,
+      "ui_step": 0.31578946113586426,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 120,
+      "ratio": 0.25,
+      "delta_frames": 0.25,
+      "delta_time_ms": 8.333333767950535,
+      "fade_step": 0.05000000074505806,
+      "ui_step": 0.25,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 144,
+      "ratio": 0.2083333283662796,
+      "delta_frames": 0.2083333283662796,
+      "delta_time_ms": 6.9444444961845875,
+      "fade_step": 0.0416666679084301,
+      "ui_step": 0.2083333283662796,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 165,
+      "ratio": 0.1818181872367859,
+      "delta_frames": 0.1818181872367859,
+      "delta_time_ms": 6.060606334358454,
+      "fade_step": 0.0363636389374733,
+      "ui_step": 0.1818181872367859,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 240,
+      "ratio": 0.125,
+      "delta_frames": 0.125,
+      "delta_time_ms": 4.166666883975267,
+      "fade_step": 0.02500000037252903,
+      "ui_step": 0.125,
+      "physics_substeps": 6
+    },
+    {
+      "hz": 360,
+      "ratio": 0.0833333358168602,
+      "delta_frames": 0.0833333358168602,
+      "delta_time_ms": 2.7777780778706074,
+      "fade_step": 0.01666666753590107,
+      "ui_step": 0.0833333358168602,
+      "physics_substeps": 6
+    }
+  ],
+  "negative_control_at_120hz": {
+    "ratio": 1.0,
+    "delta_time_ms": 33.33333507180214,
+    "fade_step": 0.20000000298023224,
+    "ui_step": 1.0,
+    "physics_substeps": 2
+  }
+}

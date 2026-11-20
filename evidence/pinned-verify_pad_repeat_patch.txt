@@ -1,0 +1,21 @@
+ok    site 3 shipped at 30 fps: first repeat 0.167 s, then every 0.0667 s, 28 in 2 s
+ok    site 3 shipped at 120 fps (the bug, and the negative control): 118 repeats in 2 s
+ok    site 3 patched at 30 fps: 28 repeats in 2 s (reference 28), worst offset 0.0 ms
+ok    site 3 patched at 60 fps: 28 repeats in 2 s (reference 28), worst offset 16.7 ms
+ok    site 3 patched at 95 fps: 28 repeats in 2 s (reference 28), worst offset 43.9 ms
+ok    site 3 patched at 120 fps: 28 repeats in 2 s (reference 28), worst offset 25.0 ms
+ok    site 3 patched at 144 fps: 27 repeats in 2 s (reference 28), worst offset 33.3 ms
+ok    site 3 patched at 165 fps: 28 repeats in 2 s (reference 28), worst offset 33.3 ms
+ok    site 3 patched at 240 fps: 28 repeats in 2 s (reference 28), worst offset 29.2 ms
+ok    site 3 patched at 360 fps: 27 repeats in 2 s (reference 28), worst offset 33.3 ms
+ok    site 3 patched at 30 fps equals the shipped loop frame by frame (repeat bits and counts)
+ok    site 3 patched: a release resets the count at once (count 15.00 -> 0.0)
+ok    site 3 delay 60 / pulse 1: shipped at 30 fps 61 repeats in 4 s, patched at 120 fps 61, shipped at 120 fps 421
+ok    site 4 shipped at 30 fps: the fast switch after 2.033 s held
+ok    site 4 unpatched countdown with the VFR patch at 60 fps: the fast switch after 2.017 s held
+ok    site 4 unpatched countdown with the VFR patch at 120 fps: the fast switch after 2.008 s held
+ok    site 4 unpatched countdown with the VFR patch at 144 fps: the fast switch after 2.007 s held
+ok    site 4 unpatched countdown with the VFR patch at 240 fps: the fast switch after 2.004 s held
+ok    site 4 unpatched countdown with the VFR patch at 360 fps: the fast switch after 2.003 s held
+ok    site 4 negative control (no VFR patch, 120 fps): the fast switch after 0.508 s
+pad repeat patch (1.9.0): all checks passed

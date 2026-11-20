@@ -1,0 +1,1870 @@
+/* The production Mac settings panel (key 1, runtime/settings_panel.h), its keyboard handling and the calls each row makes.
+   No guest, save files, game data or GPU commands are used. */
+#import <Foundation/Foundation.h>
+#include "../games/totk/runtime/frontend.m"
+#include "../games/totk/runtime/input.c"
+#include "../games/totk/third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
+#include <assert.h>
+
+/* The probe's game window: real (AppKit lays it out, draws it and routes the probe's events), never seen (user 2026-11-03:
+   test windows must not show): fully transparent, no shadow, and the mouse goes through it to whatever is below. */
+static NSWindow *probe_window(void) {
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 720) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+    w.alphaValue = 0; w.hasShadow = NO; w.ignoresMouseEvents = YES;
+    return w;
+}
+
+void mfx_set(int mode);
+int mfx_latch(void);
+void mfxup_set(int on);
+void mfxup_output_set(int on);
+int mfxup_output_enabled(void);
+void settings_test_output_init(void);
+void settings_test_output_size(unsigned w, unsigned h);
+void settings_test_output_4k(int on);
+void settings_test_aspect_init(double view);
+void settings_test_aspect_frame(void);
+#ifdef GAME_BOTW190
+void settings_test_fov_refused(int refused); void settings_test_fov_init(void); uint32_t settings_test_fov_word(void);
+static uint32_t float_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+#endif
+
+static int fakeMfx5k = -1;   /* the 4K-to-5K preset's flag (game_patches_v143.c picture_4k_to_5k_set, after PR #2240) */
+void dm_gfx_set_flag(const char *name, int value) {
+    if (!strcmp(name, "mfx_interp")) mfx_set(value);
+    else if (!strcmp(name, "mfx_output")) mfxup_output_set(value);
+    else if (!strcmp(name, "mfx_upscale")) mfxup_set(value);
+    else if (!strcmp(name, "mfx_5k_output")) fakeMfx5k = value;
+    else abort();
+}
+/* gfx/nvn/totk_ssao.h's row calls (PR #1316): whether this run patched the AO shaders, and the level last set. */
+static int fakeSsaoLive = 1, fakeSsaoSet = -1, fakeSsaoStart = -1;
+void dm_gfx_ssao_start(int pct) { fakeSsaoStart = pct; }
+int dm_gfx_ssao_locked(void) { return 0; }
+int dm_gfx_ssao_live(void) { return fakeSsaoLive; }
+void dm_gfx_ssao_set(int pct) { if (fakeSsaoLive) fakeSsaoSet = pct; }
+/* gfx/nvn/totk_fx.h's effect switches (two of them here; 1.4.3 only); the two distances are game_patches_v143.c's own (the fixture). */
+#ifdef TOTK_GAME_V143
+#define TOTK_V143 1
+#else
+#define TOTK_V143 0
+#endif
+#ifdef GAME_BOTW190   /* PR #1602: Breath of the Wild 1.9.0's effects page has 1.4.3's rows; of the switches only AO acts */
+#define BOTW_V190 1
+#else
+#define BOTW_V190 0
+#endif
+static const char *const fakeFxIds[2] = {"ao", "bloom"}, *const fakeFxNames[2][2] = {{"环境光遮蔽", "Ambient occlusion"}, {"泛光", "Bloom"}};
+static int fakeFxOn[2] = {1, 1};
+static int fakeAnisoStart = -1, fakeSharpen;
+/* Use the actual graphics selection state: the probe must not reimplement method / preset switching. */
+#define MLOG(...) ((void)0)
+#include "../games/totk/third_party/d2r_gfx/gfx/nvn/totk_aa_config.h"
+#undef MLOG
+#define fakeFxaa dm_gfx_fxaa_on()
+#define fakeSmaa dm_gfx_smaa_on()
+#define fakeSmaaQuality dm_gfx_smaa_quality()
+#define fakeFxaaQuality dm_gfx_fxaa_quality()
+void dm_gfx_aniso_start(int n) { fakeAnisoStart = n; }
+int dm_gfx_aniso_locked(void) { return 0; }
+static int fakeAniso;
+int dm_gfx_aniso(void) { return fakeAniso; }
+void dm_gfx_aniso_set(int n) { fakeAniso = n; }
+static int fakeKeepalive = 1;
+void dm_gfx_keepalive_start(int on) { fakeKeepalive = on != 0; }
+int dm_gfx_keepalive_locked(void) { return 0; }
+int dm_gfx_keepalive(void) { return fakeKeepalive; }
+void dm_gfx_keepalive_set(int on) { fakeKeepalive = on != 0; }
+void dm_gfx_sharpen_set(int pct) { fakeSharpen = pct; }
+int dm_gfx_sharpen(void) { return fakeSharpen; }
+static int fakeFxaaReplaced;   /* Breath of the Wild 1.9.0: MetalFX replaces the FXAA / upscale draw (gfx/nvn/botw_finish.h) */
+int dm_gfx_botw_fxaa_replaced(void) { return fakeFxaaReplaced; }
+int dm_gfx_fx_count(void) { return 2; }
+const char *dm_gfx_fx_id(int i) { return fakeFxIds[i]; }
+const char *dm_gfx_fx_name(int i, int english) { return fakeFxNames[i][english != 0]; }
+int dm_gfx_fx_available(int i) { return !BOTW_V190 || i == 0; }   /* as totk_fx.h: on 1.9.0 only AO */
+int dm_gfx_fx_on(int i) { return fakeFxOn[i]; }
+void dm_gfx_fx_set(int i, int on) { fakeFxOn[i] = on != 0; }
+/* runtime/gamepad.m's controller type and mouse mode without GameController: a DualSense is connected. */
+static int fakePadType = GAMEPAD_TYPE_AUTO, fakePadDetected = GAMEPAD_TYPE_PLAYSTATION, fakeMouse;
+int runtime_gamepad_type_set(int type) { return fakePadType = type; }
+int runtime_gamepad_type(int *detected) { if (detected) *detected = fakePadDetected; return fakePadType; }
+int runtime_gamepad_battery_percent(void) { return -1; }
+static int fakePadBackground;
+int runtime_gamepad_background_enabled(void) { return fakePadBackground; }
+void runtime_gamepad_background_set(int on) { fakePadBackground = !!on; }
+static RuntimeDSUSettings fakeDSU = {.endpoint="127.0.0.1:26760"};
+static RuntimeDSUStatus fakeDSUStatus;
+void runtime_dsu_settings(RuntimeDSUSettings *out) { *out=fakeDSU; }
+void runtime_dsu_status(RuntimeDSUStatus *out) { *out=fakeDSUStatus; }
+int runtime_dsu_apply(const RuntimeDSUSettings *settings) { fakeDSU=*settings; return 0; }
+int runtime_gamepad_battery_left_percent(void) { return -1; }
+int runtime_mouse_set(int on) { return fakeMouse = !!on; }
+int runtime_mouse_enabled(void) { return fakeMouse; }
+static int fakeVrEnabled, fakeVrManaged;
+int vr_enabled(void) { return fakeVrEnabled; }
+int vr_streamer_managed(void) { return fakeVrManaged; }
+void vr_resolution(int *w, int *h) { *w = *h = 0; }
+void vr_stream_resolution(int *w,int *h) { *w=2048;*h=2208; }
+int vr_set_resolution(int w, int h) { (void)w; (void)h; return 0; }
+int vr_first_person(void) { return 0; }
+void vr_set_first_person(int on) { (void)on; }
+int vr_offset_cm(int axis) { (void)axis; return 0; }
+int vr_mirror_mode(void) { return 0; }
+int vr_quest_view(void) { return 0; }
+void vr_set_quest_view(int on) { (void)on; }
+int vr_quest_zoom(void) { return 2; }
+void vr_set_quest_zoom(int x) { (void)x; }
+int vr_eye_spring_ms(void) { return 300; }
+void vr_set_eye_spring_ms(int ms) { (void)ms; }
+int vr_6dof(void) { return 0; }
+int vr_motion(void) { return 0; }
+void vr_set_motion(int on) { (void)on; }
+void vr_panel_image(const void *p, int w, int h, int s) { (void)p; (void)w; (void)h; (void)s; }
+int vr_panel_in_headset(void) { return 0; }
+void vr_set_6dof(int on) { (void)on; }
+int vr_afr(void) { return 0; }
+void vr_set_afr(int on) { (void)on; }
+int vr_ipd_pct(void) { return 100; }
+void vr_set_ipd_pct(int pct) { (void)pct; }
+int vr_snap_ms(void) { return 0; }
+void vr_set_snap_ms(int ms) { (void)ms; }
+void vr_set_mirror_mode(int on) { (void)on; }
+void vr_set_offset_cm(int axis, int cm) { (void)axis; (void)cm; }
+void runtime_mouse_set_hook(void (*hook)(void)) { (void)hook; }
+void runtime_mouse_move(double dx, double dy) { (void)dx; (void)dy; }
+void runtime_mouse_button(int button, int down) { (void)button; (void)down; }
+void runtime_mouse_release(void) {}
+static int fakeSensitivity = 50, fakeSensitivityLocked;
+int runtime_mouse_sensitivity(void) { return fakeSensitivity; }
+int runtime_mouse_sensitivity_locked(void) { return fakeSensitivityLocked; }
+void runtime_mouse_sensitivity_set(int sensitivity) { fakeSensitivity = sensitivity; }
+void runtime_gamepad_clear(void) {}
+static char savedName[64], savedWord[16];
+void runtime_setting_save(const char *name, const char *word, const char *what) {
+    (void)what; snprintf(savedName, sizeof savedName, "%s", name); snprintf(savedWord, sizeof savedWord, "%s", word);
+    const char *dir = getenv("SETTINGS_TEST_DIR"); if (!dir) return;
+    char path[4096]; snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "w"); assert(f); assert(fprintf(f, "%s\n", word) > 0); assert(!fclose(f));
+}
+int runtime_setting_word(const char *name, char *word, size_t size) {
+    const char *dir = getenv("SETTINGS_TEST_DIR"); if (!dir) return 0;
+    char path[4096]; snprintf(path, sizeof path, "%s/%s", dir, name); FILE *f = fopen(path, "r"); if (!f) return 0;
+    size_t n = fread(word, 1, size - 1, f); word[n] = 0; fclose(f); return 1;
+}
+static int sharedSaves;   /* saves of a setting both games share (runtime_shared_setting_save) */
+void runtime_shared_setting_save(const char *name, const char *word, const char *what) { sharedSaves++; runtime_setting_save(name, word, what); }
+int runtime_shared_setting_word(const char *name, char *word, size_t size) { return runtime_setting_word(name, word, size); }
+static char removedName[64], removedAll[512];   /* the last file removed, and every one since removedAll was cleared */
+void runtime_setting_remove(const char *name) {
+    snprintf(removedName, sizeof removedName, "%s", name);
+    strlcat(removedAll, name, sizeof removedAll); strlcat(removedAll, " ", sizeof removedAll);
+    const char *dir = getenv("SETTINGS_TEST_DIR"); if (!dir) return;
+    char path[4096]; snprintf(path, sizeof path, "%s/%s", dir, name); unlink(path);
+}
+/* runtime/account.c's local users, in memory (the file store itself is tests/test_users.c). */
+static RuntimeUser fakeUsers[RUNTIME_USERS_MAX];
+static int fakeUsersCount, fakeUsersActive;
+int runtime_users_get(RuntimeUser *out, int max) {
+    int n = 0;
+    for (int i = 0; i < fakeUsersCount && n < max; i++) out[n++] = fakeUsers[i];
+    return n;
+}
+static const int fakeUsersRunning = 0;   /* the user this run opened with: choosing another does not change it */
+int runtime_users_active(RuntimeUser *out) { *out = fakeUsers[fakeUsersRunning]; return 0; }
+int runtime_users_next(RuntimeUser *out) { *out = fakeUsers[fakeUsersActive]; return 0; }   /* the next launch's */
+int runtime_users_add(const char *name) {
+    if (fakeUsersCount >= RUNTIME_USERS_MAX || !name || !*name) return -1;
+    RuntimeUser *u = &fakeUsers[fakeUsersCount];
+    snprintf(u->name, sizeof u->name, "%s", name);
+    arc4random_buf(&u->lo, sizeof u->lo); arc4random_buf(&u->hi, sizeof u->hi);
+    return fakeUsersCount++;
+}
+int runtime_users_choose(int index) { if (index < 0 || index >= fakeUsersCount) return -1; fakeUsersActive = index; return 0; }
+/* runtime/gamepad.m's controller layout and mouse sensitivity, kept here. */
+static uint16_t fakeMap[CONTROLLER_BUTTONS]; static uint8_t fakeModes[CONTROLLER_BUTTONS];
+void runtime_controller_map_get(uint16_t *map, uint8_t *modes) { memcpy(map, fakeMap, sizeof fakeMap); memcpy(modes, fakeModes, sizeof fakeModes); }
+void runtime_controller_map_set(const uint16_t *map, const uint8_t *modes) { memcpy(fakeMap, map, sizeof fakeMap); memcpy(fakeModes, modes, sizeof fakeModes); }
+void runtime_controller_map_reset(void) { controller_map_default(fakeMap, fakeModes); }
+static int fakeSettingsButton = -1;   /* gamepad.m's settings panel button (-1 L3 + R3) */
+int runtime_gamepad_settings_button(void) { return fakeSettingsButton; }
+void runtime_gamepad_settings_button_set(int physical) { fakeSettingsButton = physical < 0 ? -1 : physical; }
+static int fakeShotButton = CONTROLLER_SCREENSHOT_DEFAULT;   /* gamepad.m's screenshot button (held 3 s; -1 none) */
+int runtime_gamepad_screenshot_button(void) { return fakeShotButton; }
+void runtime_gamepad_screenshot_button_set(int physical) { fakeShotButton = physical < 0 ? -1 : physical; }
+/* The capture button's request: runtime/input.c's screenshot key (gamepad.m runtime_capture_press), and the 截图分享
+   page's 截屏 button (shot_tab.h shot_tab_take, pointed here by the probe). */
+static int capturePresses, shotTabTakes;
+void runtime_capture_press(void) { capturePresses++; }
+static void probe_shot_tab_take(void) { shotTabTakes++; }
+/* The panel's 访问主页 (settings_panel.h settings_home_open, pointed here by the probe): the address it would open. */
+static int homeOpens; static NSURL *homeOpened;
+static void probe_home_open(NSURL *url) { homeOpens++; homeOpened = url; }
+static int fakeSettingsShortcut = 1;   /* off while a controller button is being bound */
+void runtime_gamepad_settings_enable(int on) { fakeSettingsShortcut = on; }
+static int fakeSettingsCapture;
+void runtime_gamepad_text_capture(int on) { fakeSettingsCapture = !!on; }
+/* The text bar's controller timer (the User page's add opens the bar here): a controller that is never connected. */
+void runtime_gamepad_text_read(RuntimeGamepadState *out) { *out = (RuntimeGamepadState){0}; }
+/* The 排行榜 page (board_tab.h) picks the group of the game's pacing: none here. */
+void nvn_board_pacing(int *lock, int *interp) { *lock = 0; *interp = 0; }
+/* runtime/hid_feedback.c's and gamepad_feedback.m's rumble, strength and gyro switches without a controller. */
+static int fakeFeedback[2] = {1, 1}, fakeFeedbackLocked[2], fakeFeedbackPresent[2] = {1, 1}, fakeGainLocked;
+static float fakeGain = 1;
+int runtime_feedback_locked(int gyro) { return fakeFeedbackLocked[gyro]; }
+int runtime_feedback_present(int gyro) { return fakeFeedbackPresent[gyro]; }
+int runtime_feedback_choice(int gyro) { return fakeFeedback[gyro]; }
+void runtime_feedback_choose(int gyro, int on) { fakeFeedback[gyro] = !!on; }
+int runtime_rumble_gain_locked(void) { return fakeGainLocked; }
+float runtime_rumble_gain(void) { return fakeGain; }
+void runtime_rumble_gain_set(float gain) { fakeGain = gain; }
+/* gfx/nvn/hle_nvn.c's frame lock (its pacing is checked by probe-gfx's present-interval probe). */
+static int fakeLock;
+void nvn_fps_lock_set(int fps) { if (totk_fps_limit_valid(fps)) fakeLock = fps; }
+int nvn_fps_lock(void) { return fakeLock; }
+/* runtime/gamepad_feedback.m's DualSense bow trigger switch without a controller. */
+static int fakeTriggers = 1, fakeTriggersLocked;
+#ifndef GAME_BOTW160
+static int fakeTriggersAvailable = 1;
+#endif
+int runtime_triggers_available(void) {
+#ifdef GAME_BOTW160
+    return 0;   /* This game version has no bow-state reader. */
+#else
+    return fakeTriggersAvailable;
+#endif
+}
+int runtime_triggers_locked(void) { return fakeTriggersLocked; }
+int runtime_triggers_choice(void) { return fakeTriggers; }
+void runtime_triggers_choose(int on) { fakeTriggers = !!on; }
+void runtime_triggers_release(void) {}
+/* A window key is the user's input (runtime/input.c user_input): it stops a survey and an auto-load, neither here. */
+void runtime_survey_cancel_user(void) {}
+void runtime_autoload_user_input(void) {}
+uint64_t runtime_now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+#define SIZE(w, h) ((uint64_t)(h) << 32 | (w))
+/* Key 1, a page that needs another panel and the aspect ratio's window size all act through the main queue. This returns when
+   what is queued so far has run: the queue keeps its order, so a block queued behind them shows it. A fixed wait does not
+   do: a run loop pass can use up the time before it looks at the queue (10-19 ms on an M5 Pro right after the panel with the
+   drawings was made, more on a busy runner) and then leaves, the queue unserved. */
+static void tick(void) {
+    __block BOOL served = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{ served = YES; });
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:20];   /* within the test's 35 s for a run */
+    while (!served && limit.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:limit];
+    if (!served) { fprintf(stderr, "the main queue was not served in 20 s\n"); abort(); }
+}
+/* Text entry also crosses a background queue: any number of main-queue passes can finish before it runs. */
+static void wait_for(BOOL (^ready)(void)) {
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:10];
+    while (!ready() && limit.timeIntervalSinceNow > 0) {
+        tick();
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    }
+    assert(ready());
+}
+static void press(unsigned key) { runtime_input_key_synthetic(key, 1); runtime_input_key_synthetic(key, 0); tick(); }
+static void key_event(unsigned short code, BOOL down) {
+    NSEvent *e = [NSEvent keyEventWithType:down ? NSEventTypeKeyDown : NSEventTypeKeyUp location:NSZeroPoint modifierFlags:0
+                                 timestamp:0 windowNumber:window.windowNumber context:nil characters:@"x"
+               charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:code];
+    if (down) [window.contentView keyDown:e]; else [window.contentView keyUp:e];
+    tick();
+}
+static TOTKSettingRow *row(NSString *title) {
+    for (TOTKSettingRow *r in settingsPanel.allRows) if ([r.title hasPrefix:title]) return r;
+    fprintf(stderr, "no row %s\n", title.UTF8String); abort();
+}
+static NSPopUpButton *menu(NSString *title) { return (NSPopUpButton *)row(title).control; }
+static void footer_spacing_probe(void) {
+    NSUInteger counts[SETTINGS_PAGES] = {0};
+    for (TOTKSettingRow *r in settingsPanel.allRows) counts[r.page]++;
+    NSInteger previous = settingsPanel.page, longest = SETTINGS_PAGE_DISPLAY;
+    for (NSInteger p = 0; p < SETTINGS_PAGES; p++)
+        if (counts[p] > counts[longest]) longest = p;
+    [settingsPanel selectPage:longest]; tick();
+    NSView *band = settingsPanel.rows.lastObject.control.superview;
+    NSRect lastBand = [band convertRect:band.bounds toView:settingsPanel];
+    NSRect version = settingsPanel.versionLabel.frame;
+    assert(NSMinX(version) <= 20 && NSMinY(version) >= 6 &&
+           NSMaxY(version) <= NSMinY(lastBand) - 6 && NSMinY(lastBand) - NSMaxY(version) <= 14);
+    [settingsPanel selectPage:previous]; tick();
+}
+static void pick(NSString *title, NSString *choice) {
+    NSPopUpButton *p = menu(title);
+    assert(p.enabled && [p indexOfItemWithTitle:choice] >= 0);
+    [p selectItemWithTitle:choice]; [row(title) changed:p]; settings_test_aspect_frame();
+}
+static void flip(NSString *title, BOOL on) {
+    NSSwitch *s = (NSSwitch *)row(title).control;
+    s.state = on ? NSControlStateValueOn : NSControlStateValueOff; [row(title) changed:s];
+}
+static void shows(NSString *title, NSString *choice) {
+    [settingsPanel.timer fire];
+    NSString *now = menu(title).titleOfSelectedItem;
+    if (![now isEqualToString:choice]) { fprintf(stderr, "%s shows %s, expected %s\n", title.UTF8String, now.UTF8String, choice.UTF8String); abort(); }
+}
+/* The window's content: that height (or the most the screen's visible area holds), 16:9, each side within a point of the
+   exact size: whole points cannot always be 16:9 (a 1512-point screen holds 1512x850.5; 1511x850 fits, 851 high would need 1513). */
+static void window_is(CGFloat h) {
+    NSRect room = [window contentRectForFrameRect:(window.screen ?: NSScreen.mainScreen).visibleFrame];
+    CGFloat want = fmin(h, fmin(room.size.height, room.size.width * 9 / 16));
+    NSSize now = window.contentView.bounds.size;
+    if (fabs(now.height - want) > 1 || fabs(now.width - want * 16 / 9) > 1) {
+        fprintf(stderr, "window %.0fx%.0f, expected height %.0f at 16:9\n", now.width, now.height, want); abort();
+    }
+}
+static void shaped(double ratio) {
+    NSSize now = window.contentView.bounds.size;
+    if (fabs(now.width / now.height - ratio) > 0.01) { fprintf(stderr, "window %.0fx%.0f, expected ratio %.3f\n", now.width, now.height, ratio); abort(); }
+}
+static void rows_fit(void) {
+    /* Short windows compress rows, then scroll: check their actual geometry instead of assuming the default height. */
+    assert(NSContainsRect(window.contentView.bounds, settingsPanel.frame));
+    for (NSInteger page = 0; page < SETTINGS_PAGE_BINDINGS; page++) {
+        NSView *view = settingsPanel.pages[(NSUInteger)page], *document = view;
+        assert(NSContainsRect(settingsPanel.bounds, view.frame));
+        if ([view isKindOfClass:NSScrollView.class]) {
+            NSScrollView *scroll = (NSScrollView *)view;
+            assert(scroll.hasVerticalScroller && scroll.documentView);
+            document = scroll.documentView;
+        }
+        CGFloat previousBottom = NSMaxY(document.bounds);
+        for (TOTKSettingRow *r in settingsPanel.allRows) if (r.page == page) {
+            NSView *band = r.control.superview;
+            assert(band && band.superview == document && band.frame.size.height >= 24);
+            assert(NSContainsRect(document.bounds, band.frame));
+            assert(NSMaxY(band.frame) <= previousBottom);   /* no overlapping rows */
+            previousBottom = NSMinY(band.frame);
+        }
+    }
+}
+static NSEvent *key_down(unsigned short code, NSEventModifierFlags flags) {
+    return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:window.windowNumber
+                             context:nil characters:@"x" charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:code];
+}
+static TOTKBindingButton *box(int action, int slot) {
+    for (TOTKBindingButton *b in settingsPanel.bindingButtons) if (b.gameAction == action && b.slot == slot) return b;
+    fprintf(stderr, "no box %d/%d\n", action, slot); abort();
+}
+static BOOL titled(NSButton *b, NSString *text) {
+    if ([b.title isEqualToString:text]) return YES;
+    fprintf(stderr, "box shows %s, expected %s\n", b.title.UTF8String, text.UTF8String); return NO;
+}
+static BOOL switched(NSString *title) { [settingsPanel.timer fire]; return ((NSSwitch *)row(title).control).state == NSControlStateValueOn; }
+
+static void persistence_probe(const char *action) {
+#ifdef GAME_BOTW190
+    const int outputMode = OUTPUT_MODE_METALFX;   /* 1.9.0 has no native 2K canvas mode. */
+    NSString *outputChoice = @"1080p + MetalFX upscaling";
+#else
+    const int outputMode = OUTPUT_MODE_NATIVE;
+    NSString *outputChoice = @"2K (2560×1440)";
+#endif
+    window = probe_window();
+    window.contentView = [[TOTKInputView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
+    if (!strcmp(action, "save")) {
+        settings_test_output_init(); settings_test_aspect_init(16.0 / 9); settings_show(1);
+        pick(@"Overlay", @"FPS + playtime"); pick(@"Frame interpolation", @"40+40");
+        pick(@"Resolution", outputChoice); pick(@"Aspect ratio", @"21:9"); pick(@"Edge smoothing", @"MetalFX");
+#ifdef TOTK_GAME_V143
+        pick(@"Anti-aliasing method",@"FXAA");pick(@"Anti-aliasing quality",@"Quality");
+        pick(@"Anti-aliasing method",@"SMAA");tick();pick(@"Anti-aliasing quality",@"Ultra");
+#endif
+        assert(fakeLock == 0 && mfx_requested() == MFX_40); return;
+    }
+    settings_restore_begin();
+#ifdef TOTK_GAME_V143
+    if(!strcmp(action,"restore")||!strcmp(action,"override")){
+        assert(fakeSmaa&&fakeSmaaQuality==3&&fakeFxaaQuality==1);
+        dm_gfx_aa_method_set(1);assert(atomic_load(&g_fin_fxaa_quality));
+        dm_gfx_aa_method_set(2);assert(fakeSmaaQuality==3&&!atomic_load(&g_fin_fxaa_quality));
+    }
+#endif
+    if (!strcmp(action, "corrupt")) {
+        assert(settingsPendingOutput == -1 && settingsPendingAspect == 0 && fakeLock == 0 && mfx_requested() == MFX_OFF);
+        assert(fps_overlay_hud_mode() == HUD_MODE_ALL && !taa_enabled()); return;
+    }
+    assert(fps_overlay_hud_mode() == HUD_MODE_MINIMAL);
+    if (!strcmp(action, "override")) {
+        assert(settingsPendingOutput == -1 && settingsPendingAspect == 0 && mfx_requested() == MFX_MAX && !taa_enabled()); return;
+    }
+    if (!strcmp(action, "lock")) { assert(fakeLock == 60 && mfx_requested() == MFX_OFF); return; }
+    assert(fakeLock == 0 && mfx_requested() == MFX_40 && taa_enabled());
+    assert(settingsPendingOutput == outputMode && settingsPendingAspect > 2.3f);
+    settings_restore_ready(); assert(settingsPendingOutput == outputMode && settingsPendingAspect > 2.3f);
+    settings_test_output_init(); settings_test_aspect_init(16.0 / 9); settings_restore_ready();
+    assert(settingsPendingOutput == -1 && settingsPendingAspect == 0);
+    assert(runtime_output_mode() == outputMode && fabsf(runtime_aspect_ratio() - 21.0f / 9) < 0.001f);
+}
+
+/* Original FXAA and split AA preferences through production selection state; no NSApplication, window or GPU. */
+#ifdef TOTK_GAME_V143
+static void aa_preferences_probe(void) {
+    settings_effects_restore();
+    int method=atoi(getenv("SETTINGS_TEST_AA_METHOD"));
+    assert(dm_gfx_aa_method()==method);
+    assert(dm_gfx_fxaa_quality()==atoi(getenv("SETTINGS_TEST_FXAA_QUALITY")));
+    assert(dm_gfx_smaa_quality()==atoi(getenv("SETTINGS_TEST_SMAA_QUALITY")));
+    TOTKSettingRow *quality=nil;
+    for(TOTKSettingRow *r in settings_effect_rows())if([r.title isEqualToString:@"Anti-aliasing quality"])quality=r;
+    if(!method)assert(!quality&&!atomic_load(&g_fin_fxaa_quality));
+    else assert(quality&&quality.choices.count==(method==1?2:4));
+    if(method==2)assert(!atomic_load(&g_fin_fxaa_quality));
+    puts("pass: AA preferences");
+}
+#endif
+/* Only row models and settings functions: no NSApplication, window or GPU. */
+static TOTKSettingRow *frame_row(NSString *title) {
+    for (TOTKSettingRow *r in settings_rows()) if ([r.title isEqualToString:title]) return r;
+    abort();
+}
+static void frame_probe(void) {
+    assert(getenv("SETTINGS_TEST_DIR"));
+    unsetenv("TOTK_MFX");
+    TOTKSettingRow *lock=frame_row(@"Frame lock"), *interp=frame_row(@"Frame interpolation (MetalFX)");
+    assert(([lock.values isEqualToArray:@[@0,@30,@40,@60,@72,@90,@120]] && lock.set));
+    assert(fakeLock==0); settings_restore_begin(); assert(fakeLock==0);
+    const int rates[]={0,30,40,60,72,90,120};
+    for(unsigned i=0;i<sizeof rates/sizeof *rates;i++){
+        int fps=rates[i]; char expected[32];
+        if(fps)snprintf(expected,sizeof expected,"lock-%d",fps);else strcpy(expected,"off");
+        mfx_set(MFX_OFF); lock.set(fps);
+        assert(fakeLock==fps && mfx_requested()==MFX_OFF);
+        assert(!strcmp(savedName,"graphics-frame.txt") && !strcmp(savedWord,expected));
+        fakeLock=0; settings_restore_begin(); assert(fakeLock==fps && mfx_requested()==MFX_OFF);
+    }
+    lock.set(72); interp.set(MFX_40);
+    assert(fakeLock==0 && mfx_requested()==MFX_40 && !strcmp(savedWord,"interp-2"));
+    mfx_set(MFX_OFF); settings_restore_begin(); assert(fakeLock==0 && mfx_requested()==MFX_40);
+    lock.set(90); assert(mfx_requested()==MFX_OFF && !strcmp(savedWord,"lock-90"));
+    interp.set(MFX_30); interp.set(MFX_OFF);
+    assert(fakeLock==0 && !strcmp(savedWord,"off"));
+    lock.set(120);
+    for(unsigned i=0;i<2;i++){
+        setenv("TOTK_MFX",i?"interpmax":"0",1);fakeLock=0;mfx_set(i?MFX_MAX:MFX_OFF);
+        settings_restore_begin();
+        assert(fakeLock==0 && mfx_requested()==(i?MFX_MAX:MFX_OFF));
+        assert(!frame_row(@"Frame lock").set);
+        char word[32]; assert(runtime_setting_word("graphics-frame.txt",word,sizeof word) && !strcmp(word,"lock-120\n"));
+    }
+    unsetenv("TOTK_MFX");mfx_set(MFX_OFF);
+    const char *bad[]={"lock-0","lock-73","lock--1","lock-90junk","lock-120 trailing","invalid"};
+    for(unsigned i=0;i<sizeof bad/sizeof *bad;i++){
+        runtime_setting_save("graphics-frame.txt",bad[i],"test");fakeLock=0;settings_restore_begin();assert(fakeLock==0);
+    }
+    runtime_setting_save("graphics-frame.txt","lock-72  ","test");settings_restore_begin();assert(fakeLock==72);
+    runtime_input_key_synthetic(25,1);runtime_input_key_synthetic(25,0);assert(fakeLock==72); /* key 9 is unassigned */
+    NSString *path=[@(getenv("SETTINGS_TEST_DIR")) stringByAppendingPathComponent:@"graphics-frame.txt"];
+    assert([NSFileManager.defaultManager removeItemAtPath:path error:nil]);fakeLock=0;settings_restore_begin();assert(fakeLock==0);
+    unsetenv("SETTINGS_TEST_DIR");lock.set(90); /* no directory: no player file is written */
+    puts("pass: frame lock choices, shared persistence, interpolation, overrides, invalid/deleted files, key 9 inert");
+}
+
+/* A controller's press, as the pages' tests use it. */
+static double padAt = 1000;
+enum { PAD_A = 1u << 0, PAD_L1 = 1u << 6, PAD_R1 = 1u << 7, PAD_UP = 1u << 13, PAD_DOWN = 1u << 15 };
+static void pad_press(uint64_t buttons) {
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:padAt += 1 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = buttons} time:padAt += 0.1 active:YES];
+}
+
+/* The 截图分享 page (shot_tab.h): its tab and place, the switch greyed out without the launcher's folder and flipped by A
+   with it. TOTK_SHOT_URL is a closed port unless SHOTS_TEST_URL names the inbox's test/local-server.js: then six pictures
+   are shared (three this Mac's, three another player's) and the grid, the player's own (green, Delete), the whole picture
+   (A, then B; a click, then Esc), a delete, the switch's marks and reading on at the end of the list are checked.
+   SHOTS_TEST_PNG: where pictures of the panel go (-grid, -picture, -zh before the extension). */
+@interface TOTKShotsPage (Probe)
+-(void)takeNewest:(NSDictionary *)data;
+-(void)showShots:(NSArray<NSDictionary *> *)all;
+@end
+enum { SHOTS_PAD_B = 1u << 1 };
+static TOTKShotsPage *shots_page(void) { return (TOTKShotsPage *)settingsPanel.pages[SETTINGS_PAGE_SHOTS]; }
+static void shots_wait(const char *what, BOOL (^ready)(void)) {
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:25];
+    while (!ready() && limit.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    if (!ready()) { fprintf(stderr, "screenshots page: no %s in 25 s (status \"%s\")\n", what, shots_page().status.stringValue.UTF8String); abort(); }
+}
+/* Esc as typed: through the application's event queue (where local monitors see it), then sent on. */
+static void shots_escape(void) {
+    NSEvent *esc = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:window.windowNumber
+                                     context:nil characters:@"\x1b" charactersIgnoringModifiers:@"\x1b" isARepeat:NO keyCode:53];
+    [NSApp postEvent:esc atStart:YES];
+    NSEvent *got = [NSApp nextEventMatchingMask:NSEventMaskKeyDown untilDate:[NSDate dateWithTimeIntervalSinceNow:0.3] inMode:NSDefaultRunLoopMode dequeue:YES];
+    if (got) [NSApp sendEvent:got];
+    tick(); tick();
+}
+static NSUInteger shots_own(void) { NSUInteger n = 0; for (TOTKShotCell *c in shots_page().cells) n += c.mine && c.deleteButton; return n; }
+static void shots_png(NSString *suffix) {
+    const char *png = getenv("SHOTS_TEST_PNG"); if (!png) return;
+    NSView *v = settingsPanel; [v displayIfNeeded];
+    NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds]; [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
+    NSString *path = [[@(png) stringByDeletingPathExtension] stringByAppendingFormat:@"%@.png", suffix];
+    assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+    printf("picture: %s\n", path.UTF8String);
+}
+/* A made-up game picture: sky, ground and a sun, in colours of its own (w x h: one is 4:3, the box stays 16:9). */
+static CGImageRef shots_picture(int n, size_t w, size_t h) {
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, 0, space, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+    CGColorSpaceRelease(space); assert(c);
+    CGContextSetFillColorWithColor(c, [NSColor colorWithHue:n / 6.0 saturation:0.45 brightness:0.92 alpha:1].CGColor);
+    CGContextFillRect(c, CGRectMake(0, 0, w, h));
+    CGContextSetFillColorWithColor(c, [NSColor colorWithHue:fmod(n / 6.0 + 0.3, 1) saturation:0.6 brightness:0.45 alpha:1].CGColor);
+    CGContextFillRect(c, CGRectMake(0, 0, w, h * (0.25 + 0.08 * n)));
+    CGContextSetFillColorWithColor(c, NSColor.whiteColor.CGColor);
+    CGContextFillEllipseInRect(c, CGRectMake(w * (0.75 - 0.1 * n), h * 0.65, h * 0.18, h * 0.18));
+    CGImageRef img = CGBitmapContextCreateImage(c); CGContextRelease(c); return img;
+}
+/* Shared as player `board` (nil: this Mac's own id), with shot_upload.h's own body and post. */
+static void shots_share(int n, NSString *board) {
+    CGImageRef img = shots_picture(n, n == 3 ? 1024 : 1920, n == 3 ? 768 : 1080);
+    NSMutableDictionary *body = [totk_shot_body(img) mutableCopy]; CGImageRelease(img); assert(body);
+    if (board) body[@"board_id"] = board;
+    NSData *json = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    __block NSInteger status = 0;
+    dispatch_sync(totk_shot_worker(), ^{ status = totk_shot_post(json); });
+    if (status != 200) { fprintf(stderr, "screenshots page: sharing picture %d answered %ld\n", n, (long)status); abort(); }
+}
+/* The HDR / EDR choice (runtime/hdr_auto.h, frontend.m front_hdr_auto): off, on, auto. No window: front_hdr_auto takes
+   the screen's potential EDR value from the test. */
+static void hdr_start(const char *env, const char *file) {
+    if (env) setenv("TOTK_HDR", env, 1); else unsetenv("TOTK_HDR");
+    if (file) runtime_setting_save("hdr.txt", file, "test"); else runtime_setting_remove("hdr.txt");
+    front_hdr_init();
+}
+static void hdr_probe(void) {
+    assert(getenv("SETTINGS_TEST_DIR"));
+    unsetenv("TOTK_HDR_CONTROL"); unsetenv("TOTK_MFX");
+#ifndef TOTK_GAME_V143
+    /* 1.2.1 and Breath of the Wild have no HDR: no row, and auto changes nothing */
+    hdr_start("auto", "auto"); front_hdr_auto(16, "probe XDR");
+    assert(!totk_hdr_available() && front_hdr_choice() == HDR_CHOICE_OFF && !front_hdr_enabled());
+    for (TOTKSettingRow *r in settings_rows()) assert(![r.title hasPrefix:@"HDR"]);
+#else
+    /* The start: TOTK_HDR, set and not empty, wins (1 on, auto auto, anything else off); otherwise hdr.txt's first word. */
+    static const struct { const char *env, *file; int choice; } starts[] = {
+        {NULL, NULL, HDR_CHOICE_OFF}, {NULL, "on", HDR_CHOICE_ON}, {NULL, " auto ", HDR_CHOICE_AUTO}, {NULL, "off", HDR_CHOICE_OFF},
+        {NULL, "1", HDR_CHOICE_OFF}, {NULL, "  ", HDR_CHOICE_OFF}, {"", "auto", HDR_CHOICE_AUTO}, {"", "on", HDR_CHOICE_ON},
+        {"1", NULL, HDR_CHOICE_ON}, {"1", "off", HDR_CHOICE_ON}, {"1", "auto", HDR_CHOICE_ON}, {"auto", NULL, HDR_CHOICE_AUTO},
+        {"auto", "off", HDR_CHOICE_AUTO}, {"auto", "on", HDR_CHOICE_AUTO}, {"0", "on", HDR_CHOICE_OFF}, {"0", "auto", HDR_CHOICE_OFF}};
+    for (size_t i = 0; i < sizeof starts / sizeof *starts; i++) { hdr_start(starts[i].env, starts[i].file); assert(front_hdr_choice() == starts[i].choice); }
+    /* On and off are the switch as before, whatever the screen. */
+    hdr_start(NULL, "on"); front_hdr_auto(1, "probe SDR monitor"); assert(front_hdr_enabled());
+    hdr_start(NULL, "off"); front_hdr_auto(16, "probe XDR"); assert(!front_hdr_enabled());
+    hdr_start(NULL, NULL); front_hdr_auto(16, "probe XDR"); assert(!front_hdr_enabled());   /* no setting: off, as before */
+    /* No window yet: auto starts from the main screen's own potential, whichever screen that is here. The switch is
+       put the other way first, so the start is seen to set it on an SDR screen and on an HDR one alike. */
+    int here = NSScreen.mainScreen && NSScreen.mainScreen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1;
+    hdr_start(NULL, here ? "off" : "on"); assert(front_hdr_enabled() == !here);
+    hdr_start("auto", NULL); assert(front_hdr_choice() == HDR_CHOICE_AUTO && front_hdr_enabled() == here);
+
+    /* Auto as the window moves: an SDR monitor (potential 1), an XDR screen (16), back. Frame interpolation follows the
+       switch (mfx_latch takes MFX_OFF while it is on), and the player's request stays for the SDR monitor. */
+    front_hdr_auto(1, "probe SDR monitor"); assert(!front_hdr_enabled());
+    mfx_set(MFX_30); mfx_latch(); assert(mfx_enabled() == MFX_30);
+    front_hdr_auto(16, "probe XDR"); assert(front_hdr_enabled() && !mfx_enabled());
+    mfx_latch(); assert(!mfx_enabled() && mfx_requested() == MFX_30);
+    front_hdr_auto(1, "probe SDR monitor"); mfx_latch(); assert(!front_hdr_enabled() && mfx_enabled() == MFX_30);
+    mfx_set(MFX_OFF); mfx_latch();
+
+    /* hdr.txt takes each choice's word and the start reads it back. */
+    unsetenv("TOTK_HDR");
+    for (int c = HDR_CHOICE_OFF; c <= HDR_CHOICE_AUTO; c++) {
+        runtime_front_hdr_set(c); front_hdr_auto(c == HDR_CHOICE_ON ? 1 : 16, "probe");
+        assert(!strcmp(savedName, "hdr.txt") && !strcmp(savedWord, hdr_choice_word(c)) && front_hdr_choice() == c);
+        assert(front_hdr_enabled() == (c != HDR_CHOICE_OFF));
+        front_hdr_init(); assert(front_hdr_choice() == c);
+    }
+
+    /* The row: Off / Auto / On, so a controller stepping from Off reaches Auto without passing On (On turns frame
+       interpolation off). It shows the choice, not the switch. */
+    TOTKSettingRow *hdr = frame_row(@"HDR / EDR"), *interp = frame_row(@"Frame interpolation (MetalFX)");
+    assert(([hdr.choices isEqualToArray:@[@"Off", @"Auto (on an HDR screen)", @"On"]]));
+    assert(([hdr.values isEqualToArray:@[@(HDR_CHOICE_OFF), @(HDR_CHOICE_AUTO), @(HDR_CHOICE_ON)]] && hdr.set));
+    NSUInteger rows = 0; for (TOTKSettingRow *r in settings_rows()) rows += [r.title hasPrefix:@"HDR"];
+    assert(rows == SETTINGS_HDR_ROWS);
+    hdr.set(HDR_CHOICE_OFF); interp.set(MFX_30);
+    hdr.set(HDR_CHOICE_AUTO); front_hdr_auto(1, "probe SDR monitor");
+    assert(hdr.get() == HDR_CHOICE_AUTO && !front_hdr_enabled() && !strcmp(savedWord, "auto") && mfx_requested() == MFX_30);   /* auto keeps interpolation */
+    interp.set(MFX_40); assert(hdr.get() == HDR_CHOICE_AUTO && mfx_requested() == MFX_40);   /* auto is off here: nothing to turn off */
+    front_hdr_auto(16, "probe XDR"); assert(hdr.get() == HDR_CHOICE_AUTO && front_hdr_enabled());
+    interp.set(MFX_30);   /* auto is on here: picking interpolation turns HDR off, as with On */
+    assert(hdr.get() == HDR_CHOICE_OFF && !front_hdr_enabled() && !strcmp(savedName, "hdr.txt") && !strcmp(savedWord, "off"));
+    hdr.set(HDR_CHOICE_ON); assert(hdr.get() == HDR_CHOICE_ON && front_hdr_enabled() && mfx_requested() == MFX_OFF);   /* On turns interpolation off, as before */
+    hdr.set(HDR_CHOICE_OFF); assert(hdr.get() == HDR_CHOICE_OFF && !front_hdr_enabled() && !strcmp(savedWord, "off"));
+    mfx_set(MFX_OFF); mfx_latch();
+#endif
+    puts("pass: HDR / EDR choice");
+}
+static void shots_probe(void) {
+    const char *dir = getenv("SETTINGS_TEST_DIR"), *server = getenv("SHOTS_TEST_URL"); assert(dir);
+    NSString *game = [@(dir) stringByAppendingPathComponent:@"shots/TOTK"];   /* the board id lives in the folder above */
+    assert([NSFileManager.defaultManager createDirectoryAtPath:game withIntermediateDirectories:YES attributes:nil error:nil]);
+    if (server) setenv("TOTK_SHOT_URL", server, 1);
+    setenv("TOTK_CONTROLS", [@(dir) stringByAppendingPathComponent:@"controls.txt"].UTF8String, 1);
+    settings_test_output_init();
+    window = probe_window();
+    window.contentView = [[TOTKInputView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
+
+    /* A run the launcher named no folder for: the switch greyed out and out of the controller's way. */
+    unsetenv("TOTK_BOARD_DIR"); g_settings_page = SETTINGS_PAGE_SHOTS; settings_show(1);
+    TOTKShotsPage *page = shots_page();
+    assert(settingsOpen && settingsPanel.page == SETTINGS_PAGE_SHOTS && settingsPanel.tabs.selectedSegment == SETTINGS_PAGE_SHOTS && !page.hidden);
+    assert([[settingsPanel.tabs labelForSegment:SETTINGS_PAGE_SHOTS] isEqualToString:@"Screenshots"] && SETTINGS_PAGE_SHOTS == SETTINGS_PAGE_BOARD + 1);
+    assert(settingsPanel.tabs.segmentCount == settings_pages() && settings_pages() - 1 == (vr_enabled() ? SETTINGS_PAGE_VR : SETTINGS_PAGE_SHOTS));
+    assert(!page.toggle.enabled && [page.state.stringValue isEqualToString:@"This run shares no screenshots"] && ![settingsPanel.controllerTargets containsObject:page.toggle]);
+    for (NSInteger p = 0; p < (NSInteger)settingsPanel.pages.count; p++) assert(settingsPanel.pages[(NSUInteger)p].hidden == (p != SETTINGS_PAGE_SHOTS));
+    /* 截屏 (user 2026-11-11): the capture button's request (screenshot.h screenshot_request is what it calls in the game), by a
+       click or a controller's A, with or without sharing; the panel stays open. */
+    assert(shot_tab_take == screenshot_request && [page.takeButton.title isEqualToString:@"Take screenshot"] && page.takeButton.enabled && !page.takeButton.hidden);
+    assert(NSMaxX(page.takeButton.frame) <= NSWidth(page.bounds) - 10 && NSMinY(page.takeButton.frame) >= NSMinY(page.toggle.frame) - 4 &&
+           NSMaxX(page.toggle.frame) < NSMinX(page.takeButton.frame));   /* the switch's line, at its right */
+    assert([settingsPanel.controllerTargets isEqualToArray:(@[page.takeButton, page.folderButton, settingsPanel.homeButton])]);
+    /* 截图保存目录 (user 2026-11-11: moved here from the input page): the folder in force and 更改文件夹…, under the nickname. */
+    assert([page.folderButton.title isEqualToString:@"Change Folder…"] && [page.folderLabel.stringValue hasPrefix:@"Screenshot folder: /"]);
+    assert(NSMaxY(page.folderButton.frame) <= NSMinY(page.nick.frame) && NSMaxY(page.scroll.frame) <= NSMinY(page.folderButton.frame) && NSMaxX(page.folderButton.frame) <= NSWidth(page.bounds) - 10);
+    assert(NSMaxX(page.folderLabel.frame) <= NSMinX(page.folderButton.frame));
+    shot_tab_take = probe_shot_tab_take;
+    [page.takeButton performClick:nil]; assert(shotTabTakes == 1 && settingsOpen && !page.hidden);
+    pad_press(PAD_A); pad_press(PAD_A);   /* the first shows where the controller is */
+    assert(shotTabTakes == 2 && settingsOpen);
+    settings_show(0);
+
+    setenv("TOTK_BOARD_DIR", game.UTF8String, 1);
+    NSString *other = NSUUID.UUID.UUIDString.lowercaseString;
+    if (server) for (int n = 0; n < 6; n++) shots_share(n, n % 2 ? other : nil);   /* the newest (5) another player's */
+    settings_show(1); page = shots_page();
+    assert(page.toggle.enabled && page.toggle.state == NSControlStateValueOff && !totk_shot_on());
+    assert([page.state.stringValue isEqualToString:@"Off: nothing is sent"] && settingsPanel.controllerTargets.firstObject == page.toggle && settingsPanel.controllerTargets[1] == page.takeButton);
+    assert(settingsPanel.controllerTargets[2] == page.nick.button && [page.nick.button.title isEqualToString:@"Change"]);   /* the nickname's 修改 (nick_row.h) */
+    if (!server) {
+        /* No server: the read fails and says it tries again; A on the switch turns sharing on and off. */
+        shots_wait("failed read", ^BOOL{ return [page.status.stringValue hasPrefix:@"The screenshots could not be read ("]; });
+        assert([page.status.stringValue hasSuffix:@"); trying again in a minute"] && page.cells.count == 0);
+        pad_press(PAD_A); pad_press(PAD_A);   /* the first shows where the controller is */
+        assert(totk_shot_on() && page.toggle.state == NSControlStateValueOn && [page.state.stringValue isEqualToString:@"On: every screenshot is shared, up to 20 a day"]);
+        pad_press(PAD_A); assert(!totk_shot_on() && [page.state.stringValue isEqualToString:@"Off: nothing is sent"]);
+        settings_show(0); return;
+    }
+    /* Off: everyone's pictures, none marked as the player's (no id is sent). */
+    shots_wait("list", ^BOOL{ return page.cells.count == 6; });
+    assert(shots_own() == 0 && page.status.stringValue.length == 0 && !page.next);
+    for (NSUInteger i = 1; i < page.shots.count; i++) assert([page.shots[i - 1][@"id"] longLongValue] > [page.shots[i][@"id"] longLongValue]);   /* newest first */
+    /* On (A): read again at once, the player's own three marked, each with its Delete after it for the controller. */
+    pad_press(PAD_A); pad_press(PAD_A); assert(totk_shot_on());
+    shots_wait("own pictures", ^BOOL{ return shots_own() == 3; });
+    NSArray<TOTKShotCell *> *cells = page.cells; NSArray *targets = settingsPanel.controllerTargets;
+    assert(!cells[0].mine && cells[1].mine && !cells[2].mine && cells[3].mine && !cells[0].deleteButton);
+    assert(targets.count == 4 + 6 + 3 + 1 && targets[0] == page.toggle && targets[1] == page.takeButton && targets[2] == page.nick.button && targets[3] == page.folderButton && targets[4] == cells[0] && targets[5] == cells[1] && targets[6] == cells[1].deleteButton && targets.lastObject == settingsPanel.homeButton);
+    assert(NSMaxY(page.scroll.frame) <= NSMinY(page.nick.frame) && NSMinY(page.nick.frame) >= 0 && NSMaxY(page.nick.frame) <= NSMinY(page.state.frame));   /* the row between the state line and the grid */
+    assert(NSWidth(cells[0].frame) * 4 + 3 * SHOT_TAB_GAP <= NSWidth(page.grid.frame) && NSMinX(cells[3].frame) > NSMinX(cells[2].frame));   /* four to a row */
+    assert(NSMinY(cells[4].frame) > NSMinY(cells[0].frame));
+    shots_wait("thumbnails", ^BOOL{ for (TOTKShotCell *c in page.cells) if (!c.thumb.image) return NO; return YES; });
+    shots_png(@"-grid");
+    /* A on a picture: the whole of it over the page; B closes it and the panel stays open. */
+    settingsPanel.controllerIndex = 4; [settingsPanel controllerHighlight]; pad_press(PAD_A);
+    assert(page.viewer && page.viewer.superview == page && NSEqualRects(page.viewer.frame, page.bounds));
+    shots_wait("whole picture", ^BOOL{ return page.viewer.image.image != nil; });
+    assert(page.viewer.image.image.size.width == 1920 && page.viewer.status.hidden);
+    shots_png(@"-picture");
+    pad_press(SHOTS_PAD_B); assert(!page.viewer && settingsOpen);
+    /* A click on a thumbnail shows it too; Esc (through the event queue, as typed) closes the picture, not the panel. */
+    NSPoint at = [cells[3] convertPoint:NSMakePoint(NSMidX(cells[3].bounds), NSMidY(cells[3].bounds)) toView:nil];
+    NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:at modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:0];
+    assert([cells[3] hitTest:[cells[3].superview convertPoint:at fromView:nil]] == cells[3]);
+    [cells[3] mouseUp:up]; assert(page.viewer);
+    shots_escape(); assert(!page.viewer && settingsOpen);
+    /* ... and it is the picture's own key monitor that does it: without it the same Esc leaves the picture (this hidden
+       window is never the key one, so the game view's Esc, which closes the panel, is not reached here). */
+    [cells[3] mouseUp:up]; assert(page.viewer && page.viewer.keyMonitor);
+    [NSEvent removeMonitor:page.viewer.keyMonitor]; page.viewer.keyMonitor = nil;
+    shots_escape(); assert(page.viewer && settingsOpen);
+    pad_press(SHOTS_PAD_B); assert(!page.viewer && settingsOpen);
+    /* Delete (A on the button): gone from the grid, and from the server's list read again. */
+    NSString *gone = cells[1].shotId;
+    settingsPanel.controllerIndex = 6; [settingsPanel controllerHighlight]; pad_press(PAD_A);
+    shots_wait("delete", ^BOOL{ return page.cells.count == 5 && shots_own() == 2; });
+    for (NSDictionary *s in page.shots) assert(![s[@"id"] isEqual:gone]);
+    shots_wait("list read again", ^BOOL{ return !page.fetching && page.fetchedAt > 0; });
+    assert(page.cells.count == 5 && settingsPanel.controllerTargets.count == 4 + 5 + 2 + 1);
+    /* A picture of the player's just shared (shot_upload.h posts TOTK_SHOT_SHARED_NOTE once the server took it): the list is
+       read at once, not at the next minute. Without the note nothing reads it in the next second and a half. */
+    shots_share(2, other);
+    NSDate *still = [NSDate dateWithTimeIntervalSinceNow:1.5];
+    while (still.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    assert(page.cells.count == 5 && !page.fetching);
+    totk_shot_announce();
+    shots_wait("list read on the note", ^BOOL{ return page.cells.count == 6; });
+    /* Off again: the marks go. */
+    settingsPanel.controllerIndex = 0; [settingsPanel controllerHighlight]; pad_press(PAD_A); assert(!totk_shot_on());
+    shots_wait("marks gone", ^BOOL{ return shots_own() == 0 && page.cells.count == 6; });
+    /* The end of the list: a full page with "next" (made up here: the server holds 5), scrolled to its end, reads the
+       older ones with before= and puts them below. */
+    NSMutableArray *made = [NSMutableArray array];
+    for (int i = 0; i < 60; i++) [made addObject:@{@"id": [NSString stringWithFormat:@"%d", 1000 - i], @"name": @"Test", @"at": @"2026-11-11T00:00:00.000Z", @"w": @1920, @"h": @1080, @"me": @NO}];
+    [page showShots:@[]]; page.fetchedAt = CACurrentMediaTime();   /* no minute's read in between */
+    [page takeNewest:@{@"shots": made, @"next": @"941"}];
+    assert(page.cells.count == 60 && [page.next isEqualToString:@"941"] && !page.fetchingMore);
+    [page.grid scrollPoint:NSMakePoint(0, NSHeight(page.grid.frame))];
+    shots_wait("older pictures", ^BOOL{ return page.cells.count == 66 && !page.next; });
+    assert([page.shots[60][@"id"] longLongValue] < 941);
+    settings_show(0);
+    /* In Chinese, for the picture. */
+    setenv("TOTK_UI_LANG", "zh", 1); g_settings_page = SETTINGS_PAGE_SHOTS; settings_show(1); page = shots_page();
+    pad_press(PAD_A); pad_press(PAD_A); assert(totk_shot_on());
+    shots_wait("list", ^BOOL{ return page.cells.count == 6 && shots_own() == 2; });
+    shots_wait("thumbnails", ^BOOL{ for (TOTKShotCell *c in page.cells) if (!c.thumb.image) return NO; return YES; });
+    assert([[settingsPanel.tabs labelForSegment:SETTINGS_PAGE_SHOTS] isEqualToString:@"截图分享"] && [page.state.stringValue isEqualToString:@"已开启：每张截图自动分享，每天最多 20 张"]);
+    shots_png(@"-zh");
+    settings_show(0); setenv("TOTK_UI_LANG", "en", 1);
+}
+
+/* The player's nickname (nick_row.h): one row on the 排行榜 and 截图分享 pages. Without NICK_TEST_URL: the row in a run
+   without the launcher's folder (greyed, out of the controller's way), "not set" before any id (nothing read), and 修改
+   through the text bar to a send that gets no answer (network error, orange). With NICK_TEST_URL (the root of the inbox's
+   test/local-server.js) and NICK_TEST_TAKEN (a nickname another player holds, set over HTTP by the test): a board record
+   and a picture of this Mac's id; from the board page by the controller, 修改 → "Link": GET /v1/name answers it, the board
+   and the pictures list it, and no upload switch went on; the 截图分享 row shows it without another read; NICK_TEST_TAKEN
+   is refused as taken (orange) and "Link" stays; an empty entry clears it. NICK_TEST_PNG=<path prefix>: pictures of both
+   pages with a nickname and with a refusal, in English and Chinese, and in a 600 pt panel. */
+static TOTKBoardPage *nick_board(void) { return (TOTKBoardPage *)settingsPanel.pages[SETTINGS_PAGE_BOARD]; }
+static void nick_wait(const char *what, BOOL (^ready)(void)) {
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:25];
+    while (!ready() && limit.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+    if (!ready()) { fprintf(stderr, "nickname: no %s in 25 s (state \"%s\", row \"%s\")\n", what, nick_board().state.stringValue.UTF8String, nick_board().nick.label.stringValue.UTF8String); abort(); }
+}
+static void nick_png(NSString *name) {
+    const char *png = getenv("NICK_TEST_PNG"); if (!png) return;
+    /* the panel's layers as Core Animation composes them (as the VR capture does); cacheDisplayInRect: sometimes left the
+       panel's own layer background out */
+    [settingsPanel layoutSubtreeIfNeeded]; [settingsPanel displayIfNeeded]; [CATransaction flush];
+    NSSize z = settingsPanel.bounds.size; const CGFloat k = 2;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:(NSInteger)(z.width * k) pixelsHigh:(NSInteger)(z.height * k)
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    NSGraphicsContext *context = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    CGContextScaleCTM(context.CGContext, k, k); [settingsPanel.layer renderInContext:context.CGContext]; [context flushGraphics];
+    NSString *path = [NSString stringWithFormat:@"%s-%s-%@.png", png, getenv("TOTK_UI_LANG"), name];
+    assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+    printf("picture: %s\n", path.UTF8String);
+}
+/* The text bar after 修改: up (the panel closed), filled with `initial`; `text` typed in its place and confirmed; the
+   panel back on the same page. */
+static void nick_enter(TOTKNickRow *row, NSString *initial, NSString *text) {
+    if (row) [row.button performClick:nil];
+    nick_wait("text bar", ^BOOL{ return openBar != nil && !settingsOpen; });
+    if (![openBar.field.stringValue isEqualToString:initial]) { fprintf(stderr, "nickname: the bar has \"%s\"\n", openBar.field.stringValue.UTF8String); abort(); }
+    assert(openBar.maxUnits == NICK_ROW_MAX && openBar.minUnits == 0 && ![openBar allowed:'/'] && [openBar allowed:' ']);
+    openBar.field.stringValue = @""; [openBar refilter];
+    if (text.length) runtime_front_text_test("type", text.UTF8String);
+    tick();
+    runtime_front_text_test("enter", "");
+    nick_wait("panel back", ^BOOL{ return settingsOpen && openBar == nil; });
+}
+static BOOL nick_state(NSTextField *state, NSString *text, NSColor *color) {
+    return [state.stringValue isEqualToString:text] && [state.textColor isEqual:color];
+}
+static NSString *nick_read(void) {
+    __block NSString *got = nil, *why = nil; __block BOOL came = NO;
+    totk_name_fetch(^(NSString *name, NSString *error) { got = name; why = error; came = YES; });
+    nick_wait("nickname read", ^BOOL{ return came; });
+    assert(!why);
+    return got;
+}
+static NSDictionary *nick_board_entry(NSString *name) {
+    for (NSDictionary *e in nick_board().entries) if ([e[@"name"] isEqual:name]) return e;
+    return nil;
+}
+static NSArray *nick_shots(void) {
+    __block NSDictionary *list = nil; __block BOOL came = NO;
+    totk_shot_fetch(nil, ^(NSDictionary *data, NSString *error) { (void)error; list = data; came = YES; });
+    nick_wait("pictures read", ^BOOL{ return came; });
+    assert(list);
+    return list[@"shots"];
+}
+/* The row's place on a page: under the state line, above the list, the button after the name and inside the page. */
+static void nick_fits(NSView *page, TOTKNickRow *row, NSTextField *state, NSView *list) {
+    assert(NSMaxY(row.frame) <= NSMinY(state.frame) && NSMinY(row.frame) >= NSMaxY(list.frame) && NSMaxX(row.frame) <= NSWidth(page.bounds) - 10);
+    assert(NSMaxX(row.label.frame) <= NSMinX(row.button.frame) && NSMaxX(row.button.frame) <= NSWidth(row.bounds) && row.label.frame.size.width > 40);
+    assert(row.label.frame.size.width >= ceil([row.label.stringValue sizeWithAttributes:@{NSFontAttributeName: row.label.font}].width));   /* the name whole */
+}
+/* 访问主页 (user 2026-11-11): the site's home on its root (the inbox's), with this game, the view of the page shown
+   (board / contrib, the photo wall's #wall from the 截图分享 page) and the player's public codes when this Mac has their
+   ids; never an id itself. Returns the query items; the fragment is checked here. */
+static NSDictionary *home_query(NSInteger page) {
+    NSURLComponents *site = [NSURLComponents componentsWithURL:settings_home_url(page) resolvingAgainstBaseURL:NO];
+    NSURLComponents *root = contrib_tab_root();
+    assert(site && root && [site.host isEqualToString:root.host] && [(site.port ?: @0) isEqual:(root.port ?: @0)] && [site.path isEqualToString:@"/"]);
+    NSMutableDictionary *items = [NSMutableDictionary dictionary];
+    for (NSURLQueryItem *i in site.queryItems) items[i.name] = i.value;
+    assert([items[@"game"] isEqual:@GAME_INBOX_ID]);
+    assert(page == SETTINGS_PAGE_BOARD ? [items[@"view"] isEqual:@"board"] : page == SETTINGS_PAGE_CONTRIB ? [items[@"view"] isEqual:@"contrib"] : !items[@"view"]);
+    assert(page == SETTINGS_PAGE_SHOTS ? [site.fragment isEqual:@"wall"] : !site.fragment);
+    NSString *bid = totk_board_id(NO);
+    NSString *path = totk_contrib_path(), *install = path ? [NSString stringWithContentsOfFile:totk_contrib_side(path, @"install") encoding:NSUTF8StringEncoding error:nil] : nil;
+    assert(!bid || ![site.URL.absoluteString containsString:bid]);
+    assert(!install.length || ![site.URL.absoluteString containsString:[install stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]]);
+    return items;
+}
+static void nick_probe(void) {
+    const char *dir = getenv("SETTINGS_TEST_DIR"), *server = getenv("NICK_TEST_URL"), *taken = getenv("NICK_TEST_TAKEN"); assert(dir);
+    NSString *game = [@(dir) stringByAppendingPathComponent:@"nick/TOTK"];   /* the board id lives in the folder above */
+    assert([NSFileManager.defaultManager createDirectoryAtPath:game withIntermediateDirectories:YES attributes:nil error:nil]);
+    if (server) {
+        setenv("TOTK_NAME_URL", [@(server) stringByAppendingString:@"/v1/name"].UTF8String, 1);
+        setenv("TOTK_BOARD_URL", [@(server) stringByAppendingString:@"/v1/board"].UTF8String, 1);
+        setenv("TOTK_SHOT_URL", [@(server) stringByAppendingString:@"/v1/shots"].UTF8String, 1);
+    }
+    setenv("TOTK_CONTROLS", [@(dir) stringByAppendingPathComponent:@"controls.txt"].UTF8String, 1);
+    settings_test_output_init();
+    window = probe_window();
+    window.contentView = [[TOTKInputView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
+
+    /* No folder from the launcher: no nickname here, and 修改 greyed and out of the controller's way, on both pages. */
+    unsetenv("TOTK_BOARD_DIR"); g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1);
+    TOTKBoardPage *board = nick_board();
+    assert(settingsOpen && [board.nick.label.stringValue isEqualToString:@"Nickname: not available in this run"] && !board.nick.button.enabled);
+    assert([board.nick.button.title isEqualToString:@"Change"] && [settingsPanel.controllerTargets isEqualToArray:@[settingsPanel.homeButton]]);
+    assert(!home_query(SETTINGS_PAGE_BOARD)[@"code"]);   /* no id: no code */
+    [settingsPanel selectPage:SETTINGS_PAGE_SHOTS]; assert(![settingsPanel.controllerTargets containsObject:shots_page().nick.button] && !shots_page().nick.button.enabled);
+    settings_show(0);
+
+    /* A folder but no id yet: "not set", and nothing is read (no id is made to read). */
+    setenv("TOTK_BOARD_DIR", game.UTF8String, 1);
+    assert(!totk_board_id(NO));
+    g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1); board = nick_board();
+    nick_wait("row without an id", ^BOOL{ return [nick_board().nick.label.stringValue isEqualToString:@"Nickname: not set (the anonymous code shows)"]; });
+    assert(board.nick.button.enabled && [settingsPanel.controllerTargets isEqualToArray:(@[board.toggle, board.nick.button, settingsPanel.homeButton])]);
+    nick_fits(board, board.nick, board.state, board.table.enclosingScrollView);
+    assert(!totk_board_id(NO));
+    if (!server) {
+        /* 修改, then a send nobody answers: the panel back on the page, the refusal in orange, the row as it was. */
+        nick_enter(board.nick, @"", @"Link");
+        board = nick_board();
+        assert(settingsPanel.page == SETTINGS_PAGE_BOARD);
+        nick_wait("network error", ^BOOL{ return nick_state(nick_board().state, @"Nickname not changed: network error, try again later", NSColor.systemOrangeColor); });
+        board = nick_board();
+        assert([board.nick.label.stringValue isEqualToString:@"Nickname: not set (the anonymous code shows)"] && board.nick.button.enabled);
+        assert(!totk_board_on() && !totk_shot_on());
+        settings_show(0); return;
+    }
+    assert(taken && *taken);
+
+    /* This Mac's player on the board and with a picture, under the anonymous code. */
+    NSString *me = totk_board_id(YES); assert(me);
+    NSDictionary *record = @{@"schema": @1, @"game": @GAME_INBOX_ID, @"board_id": me, @"game_version": @"1.0.0", @"app_build": @"test", @"platform": @"mac",
+        @"os": @"macOS 26.0", @"chip": @"Apple M4", @"gpu_cores": @10, @"memory_gb": @16,
+        @"settings": @{@"lock": @0, @"interp": @0, @"out_w": @1920, @"out_h": @1080, @"scene_w": @1920, @"scene_h": @1080, @"metalfx": @NO, @"display_hz": @60},
+        @"stats": @{@"seconds": @600, @"frames": @36000, @"avg": @60.0, @"median": @60.0, @"low1": @50.0, @"max": @61.0, @"interp_fps": @0}};
+    assert(totk_board_post(record));
+    shots_share(0, nil);
+    settings_show(0); g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1); board = nick_board();
+    nick_wait("board", ^BOOL{ return nick_board().entries.count == 1 && [nick_board().nick.label.stringValue isEqualToString:@"Nickname: not set (the anonymous code shows)"]; });
+    NSString *code = board.entries[0][@"name"];
+    assert(code.length == 6 && ![board.entries[0][@"nick"] boolValue]);
+    /* 访问主页 from this page: the board, with the code the server names this player by, and the board read with it marks
+       their row; a click and a controller's A open it (here: kept, no browser). */
+    NSDictionary *site = home_query(SETTINGS_PAGE_BOARD); assert([site[@"code"] isEqual:code]);
+    NSURL *marked = [NSURL URLWithString:[NSString stringWithFormat:@"%s/v1/board?game=%s&code=%@", server, GAME_INBOX_ID, code]];
+    NSDictionary *listing = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:marked] options:0 error:nil];
+    NSDictionary *mine = nil; for (NSDictionary *g in listing[@"data"][@"groups"]) for (NSDictionary *e in g[@"entries"]) if ([e[@"me"] boolValue]) mine = e;
+    assert(mine && [mine[@"name"] isEqual:code]);
+    settings_home_open = probe_home_open;
+    [settingsPanel.homeButton performClick:nil]; assert(homeOpens == 1 && [homeOpened isEqual:settings_home_url(SETTINGS_PAGE_BOARD)] && settingsOpen);
+    pad_press(PAD_DOWN);
+    for (int n = 0; n < 4 && settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex] != settingsPanel.homeButton; n++) pad_press(PAD_DOWN);
+    pad_press(PAD_A); assert(homeOpens == 2 && settingsOpen);
+    settings_home_open = settings_home_open_default;
+    settings_show(0); g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1); board = nick_board();
+    nick_wait("board again", ^BOOL{ return nick_board().entries.count == 1; });
+
+    /* The controller reaches 修改 after the switch; A opens the bar, empty; "Link" is set. */
+    pad_press(PAD_DOWN); assert(g_settings_controller_active);
+    for (int n = 0; n < 4 && settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex] != board.nick.button; n++) pad_press(PAD_DOWN);
+    assert(settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex] == board.nick.button);
+    pad_press(PAD_A);
+    nick_enter(nil, @"", @"Link");
+    assert(settingsPanel.page == SETTINGS_PAGE_BOARD);
+    nick_wait("nickname set", ^BOOL{ return nick_state(nick_board().state, @"Nickname set to \"Link\"", NSColor.systemGreenColor); });
+    board = nick_board();
+    assert([board.nick.label.stringValue isEqualToString:@"Nickname: Link"] && board.nick.button.enabled);
+    assert(!totk_board_on() && !totk_shot_on());   /* a nickname turns on no upload switch */
+    assert([nick_read() isEqualToString:@"Link"]);
+    nick_wait("board read again", ^BOOL{ NSDictionary *e = nick_board_entry(@"Link"); return e && [e[@"nick"] boolValue]; });
+    assert(!nick_board_entry(code));
+    NSArray *shots = nick_shots(); assert(shots.count == 1 && [shots[0][@"name"] isEqual:@"Link"] && [shots[0][@"nick"] boolValue]);
+
+    /* The 截图分享 page: the same nickname, at once (read once per opening), its 修改 after 截屏 for the controller. */
+    [settingsPanel selectPage:SETTINGS_PAGE_SHOTS];
+    TOTKShotsPage *page = shots_page();
+    assert([page.nick.label.stringValue isEqualToString:@"Nickname: Link"] && settingsPanel.controllerTargets[2] == page.nick.button);
+    nick_fits(page, page.nick, page.state, page.scroll);
+    shots_wait("pictures with the nickname", ^BOOL{ return page.shots.count == 1 && [page.shots[0][@"name"] isEqual:@"Link"]; });
+
+    /* A nickname another player holds: refused as taken, in orange; "Link" stays. */
+    nick_enter(page.nick, @"Link", @(taken));
+    assert(settingsPanel.page == SETTINGS_PAGE_SHOTS);
+    nick_wait("taken", ^BOOL{ return nick_state(shots_page().state, @"Nickname not changed: this nickname is taken", NSColor.systemOrangeColor); });
+    page = shots_page();
+    assert([page.nick.label.stringValue isEqualToString:@"Nickname: Link"] && [nick_read() isEqualToString:@"Link"]);
+    [settingsPanel selectPage:SETTINGS_PAGE_BOARD]; tick();
+    assert(nick_state(nick_board().state, @"Nickname not changed: this nickname is taken", NSColor.systemOrangeColor));   /* the same line on the other page */
+
+    /* Empty clears it, no question asked: the anonymous code again everywhere. */
+    nick_enter(nick_board().nick, @"Link", @"");
+    nick_wait("cleared", ^BOOL{ return nick_state(nick_board().state, @"Nickname cleared: the anonymous code shows", NSColor.systemGreenColor); });
+    assert([nick_board().nick.label.stringValue isEqualToString:@"Nickname: not set (the anonymous code shows)"] && nick_read() == nil);
+    nick_wait("board with the code", ^BOOL{ return nick_board_entry(code) != nil; });
+    shots = nick_shots(); assert([shots[0][@"name"] isEqual:code] && ![shots[0][@"nick"] boolValue]);
+
+    /* Pictures: both pages with a nickname and with a refusal, in English and Chinese, then in a 600 pt panel. */
+    if (getenv("NICK_TEST_PNG")) {
+        for (int zh = 0; zh < 2; zh++) {
+            setenv("TOTK_UI_LANG", zh ? "zh" : "en", 1);
+            NSString *name = zh ? @"海拉鲁的林克" : @"Link";
+            settings_show(0); g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1);
+            nick_enter(nick_board().nick, zh ? @"Link" : @"", name);   /* the English pass's is there */
+            nick_wait("board with the nickname", ^BOOL{ return nick_board_entry(name) != nil && [nick_board().nick.label.stringValue hasSuffix:name]; });
+            nick_png(@"board-nick");
+            [settingsPanel selectPage:SETTINGS_PAGE_SHOTS];
+            shots_wait("pictures with the nickname", ^BOOL{ TOTKShotsPage *p = shots_page();
+                return p.cells.count == 1 && [p.shots[0][@"name"] isEqual:name] && p.cells[0].thumb.image; });
+            nick_png(@"shots-nick");
+            nick_enter(shots_page().nick, name, @(taken));
+            nick_wait("taken", ^BOOL{ return [shots_page().state.textColor isEqual:NSColor.systemOrangeColor]; });
+            shots_wait("thumbnails", ^BOOL{ TOTKShotsPage *p = shots_page(); return p.cells.count == 1 && p.cells[0].thumb.image; });
+            nick_png(@"shots-error");
+            [settingsPanel selectPage:SETTINGS_PAGE_BOARD];
+            nick_wait("board", ^BOOL{ return nick_board_entry(name) != nil; });
+            nick_png(@"board-error");
+        }
+    }
+    /* A window 604 pt wide: the panel's narrowest (600 pt); the row still between the state line and the list, whole. */
+    settings_show(0); setenv("TOTK_UI_LANG", "en", 1); nick_row_flash = nil;   /* the Chinese pass's refusal */
+    NSSize was = window.contentView.bounds.size; [window setContentSize:NSMakeSize(604, 720)];
+    g_settings_page = SETTINGS_PAGE_BOARD; settings_show(1);
+    assert(NSWidth(settingsPanel.frame) == SETTINGS_NARROW_W);
+    board = nick_board();
+    nick_wait("narrow board", ^BOOL{ return nick_board().entries.count == 1 && [nick_board().nick.label.stringValue hasPrefix:@"Nickname: "]; });
+    nick_fits(board, board.nick, board.state, board.table.enclosingScrollView);
+    nick_png(@"board-narrow");
+    [settingsPanel selectPage:SETTINGS_PAGE_SHOTS]; page = shots_page();
+    nick_fits(page, page.nick, page.state, page.scroll);
+    shots_wait("narrow pictures", ^BOOL{ TOTKShotsPage *p = shots_page(); return p.cells.count == 1 && p.cells[0].thumb.image; });
+    nick_png(@"shots-narrow");
+    settings_show(0); [window setContentSize:was];
+}
+
+/* 着色器贡献 (contrib_tab.h, user 2026-11-11): laid out as the 排行榜 page. The panel's 访问主页 from it opens the site's
+   contributors for this game with the player's 8-hex pseudonym, sha256("player:" + install id) as the server names them
+   (MacNativeGamesWeb lib/admin.js pseudonym); with no install id yet (nothing sent) no player and none is made; never the
+   id itself. The list is the site's (GET /v1/stats): with CONTRIB_TEST_URL (a local inbox where the Python test
+   sent two players' rows, this Mac's with its install id below, the other with more) both are listed, most first, and
+   this Mac's row is marked once its id is there; without, the read fails and says so. */
+static void contrib_site_fits(TOTKContribPage *page) {
+    assert(NSMaxY(page.counts.frame) <= NSMinY(page.state.frame) && NSMaxY(page.state.frame) <= NSMinY(page.toggle.frame) + 4);
+    assert(NSMaxY(page.table.enclosingScrollView.frame) <= NSMinY(page.counts.frame) && NSMinY(page.table.enclosingScrollView.frame) >= NSMaxY(page.note.frame));
+    CGFloat used = 0; for (NSTableColumn *c in page.table.tableColumns) used += c.width + page.table.intercellSpacing.width;
+    assert(used <= page.table.enclosingScrollView.contentSize.width);   /* every column shows without scrolling sideways */
+}
+static void contrib_wait(const char *what, BOOL (^ready)(void)) {
+    for (int i = 0; i < 250 && !ready(); i++) { [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; [settingsPanel refreshContribPage]; }
+    if (!ready()) { fprintf(stderr, "contributions: no %s in 25 s (status \"%s\")\n", what, ((TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB]).status.stringValue.UTF8String); abort(); }
+}
+static void contrib_probe(void) {
+    const char *dir = getenv("SETTINGS_TEST_DIR"), *server = getenv("CONTRIB_TEST_URL"); assert(dir);
+    setenv("TOTK_STATS_URL", server ? server : "http://127.0.0.1:9", 1);
+    NSString *folder = [@(dir) stringByAppendingPathComponent:@"contrib"];
+    assert([NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil]);
+    NSString *file = [folder stringByAppendingPathComponent:@"shader-list-contribution-test.txt"];
+    assert([@"" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    setenv("TOTK_SHADER_CONTRIB", file.UTF8String, 1); unsetenv("TOTK_SHADER_SEED");
+    NSString *side = totk_contrib_side(file, @"install");
+    settings_test_output_init();
+    window = probe_window();
+    window.contentView = [[TOTKInputView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
+    settings_home_open = probe_home_open; homeOpens = 0;
+    /* Opened on another page, the board and contributors pages read nothing (2026-11-15: the panel is made again at
+       every opening, and each opening read both from the site); shown, below, they read at once. */
+    g_settings_page = SETTINGS_PAGE_DISPLAY; settings_show(1); [settingsPanel refresh];
+    TOTKContribPage *unseenContrib = (TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB];
+    TOTKBoardPage *unseenBoard = (TOTKBoardPage *)settingsPanel.pages[SETTINGS_PAGE_BOARD];
+    assert(!unseenContrib.fetching && !unseenContrib.fetchedAt && !unseenBoard.fetching && !unseenBoard.fetchedAt);
+    settings_show(0);
+    /* No install id yet: the contributors without a player, and no id made by asking. */
+    g_settings_page = SETTINGS_PAGE_CONTRIB; settings_show(1);
+    TOTKContribPage *page = (TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB];
+    contrib_site_fits(page);
+    assert([settingsPanel.controllerTargets isEqualToArray:(@[page.toggle, settingsPanel.homeButton])]);
+    assert([page.counts.stringValue isEqualToString:@"0 shaders and pipelines contributed · nothing new found yet"]);
+    assert(!home_query(SETTINGS_PAGE_CONTRIB)[@"player"] && ![NSFileManager.defaultManager fileExistsAtPath:side] && !page.me);
+    if (server) {
+        contrib_wait("list", ^BOOL{ return ((TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB]).players.count == 2; });
+        assert(page.status.stringValue.length == 0 && [page.table numberOfRows] == 2);
+    } else {
+        contrib_wait("failed read", ^BOOL{ return [((TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB]).status.stringValue hasPrefix:@"The contributors could not be read ("]; });
+        assert(page.players.count == 0);
+    }
+    [settingsPanel.homeButton performClick:nil]; assert(homeOpens == 1 && [homeOpened isEqual:settings_home_url(SETTINGS_PAGE_CONTRIB)] && settingsOpen);
+    /* An install id: its pseudonym, the one the server lists; the row marked; a controller's A opens the site too. */
+    NSString *install = @"0f0f0f0f-0000-4000-8000-000000001234";
+    assert([[install stringByAppendingString:@"\n"] writeToFile:side atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    NSData *d = [[@"player:" stringByAppendingString:install] dataUsingEncoding:NSUTF8StringEncoding]; unsigned char h[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+    NSString *expected = [NSString stringWithFormat:@"%02x%02x%02x%02x", h[0], h[1], h[2], h[3]];
+    [settingsPanel refreshContribPage]; assert([page.me isEqualToString:expected]);
+    NSDictionary *items = home_query(SETTINGS_PAGE_CONTRIB); assert([items[@"player"] isEqual:expected]);
+    assert([home_query(SETTINGS_PAGE_SHOTS)[@"player"] isEqual:expected] && [home_query(SETTINGS_PAGE_DISPLAY)[@"player"] isEqual:expected]);   /* every page carries it */
+    if (server) {
+        /* the other player sent more, so this Mac's is second, in green and bold */
+        assert(![page.players[0][@"player"] isEqual:expected] && [page.players[1][@"player"] isEqual:expected]);
+        assert([page.players[0][@"shaders"] integerValue] > [page.players[1][@"shaders"] integerValue]);
+        NSTextField *mine = (NSTextField *)[page.table viewAtColumn:1 row:1 makeIfNecessary:YES], *other = (NSTextField *)[page.table viewAtColumn:1 row:0 makeIfNecessary:YES];
+        assert([mine.stringValue isEqualToString:expected] && [mine.textColor isEqual:NSColor.systemGreenColor] && ![other.textColor isEqual:NSColor.systemGreenColor]);
+        assert([((NSTextField *)[page.table viewAtColumn:0 row:1 makeIfNecessary:YES]).stringValue isEqualToString:@"2"]);
+        const char *otherName = getenv("CONTRIB_TEST_OTHER_NAME");   /* the other player sent their board id and has a nickname: shown */
+        if (otherName) assert([other.stringValue isEqualToString:@(otherName)] && [page.players[0][@"nick"] boolValue] && ![page.players[1][@"nick"] boolValue]);
+    }
+    pad_press(PAD_DOWN);
+    for (int n = 0; n < 3 && settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex] != settingsPanel.homeButton; n++) pad_press(PAD_DOWN);
+    assert(settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex] == settingsPanel.homeButton);
+    pad_press(PAD_A); assert(homeOpens == 2 && [homeOpened.absoluteString containsString:[@"player=" stringByAppendingString:expected]]);
+    /* The panel's narrowest (600 pt): the same layout, every column in view. */
+    settings_show(0); [window setContentSize:NSMakeSize(604, 720)];
+    g_settings_page = SETTINGS_PAGE_CONTRIB; settings_show(1);
+    assert(NSWidth(settingsPanel.frame) == SETTINGS_NARROW_W);
+    contrib_site_fits((TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB]);
+    if (server && getenv("CONTRIB_TEST_PNG")) {   /* a picture of the page, for a look */
+        contrib_wait("list again", ^BOOL{ return ((TOTKContribPage *)settingsPanel.pages[SETTINGS_PAGE_CONTRIB]).players.count > 0; });
+        NSView *v = settingsPanel; NSBitmapImageRep *rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds]; [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(getenv("CONTRIB_TEST_PNG")) atomically:YES];
+    }
+    settings_home_open = settings_home_open_default;
+    settings_show(0);
+}
+int main(int argc, const char **argv) { @autoreleasepool {
+    setenv("TOTK_BOARD_URL", "http://127.0.0.1:9/v1/board", 1);   /* the 排行榜 page reads no real board in a test */
+    setenv("TOTK_SHOT_URL", "http://127.0.0.1:9/v1/shots", 1);    /* nor the 截图分享 page real pictures */
+    setenv("TOTK_NAME_URL", "http://127.0.0.1:9/v1/name", 1);     /* nor a real nickname */
+    setenv("TOTK_STATS_URL", "http://127.0.0.1:9", 1);            /* nor the 着色器贡献 page the real contributors */
+    if (argc==2 && !strcmp(argv[1],"vr-rows")) {
+        /* Exercise production row construction without NSApplication, a game,
+           a window, or GPU work. Unsupported settings must not be offered. */
+        setenv("TOTK_UI_LANG","en",1);fakeVrEnabled=fakeVrManaged=1;
+        NSMutableArray<TOTKSettingRow *> *rows=[NSMutableArray array];settings_vr_rows(rows);
+        NSMutableDictionary<NSString *,TOTKSettingRow *> *byTitle=[NSMutableDictionary dictionary];
+        for(TOTKSettingRow *r in rows)byTitle[r.title]=r;
+        assert(byTitle[@"VR · view"] && byTitle[@"Stereo · eye distance (%)"]);
+#if defined(GAME_BOTW) || defined(TOTK_GAME_V143)
+        assert(!byTitle[@"Show the Quest view"] && !byTitle[@"Mac preview zoom (x)"]);
+        assert(!byTitle[@"Head position (6DoF: lean, crouch)"]);
+        assert(!byTitle[@"Stereo (the eyes rendered in turn)"]);
+#ifdef GAME_BOTW
+        assert(!byTitle[@"First person camera spring (ms, 0 = rigid)"]);
+#else
+        assert(byTitle[@"First person camera spring (ms, 0 = rigid)"]);
+#endif
+#ifdef GAME_BOTW190
+        assert(!byTitle[@"VR · view"].set && [byTitle[@"VR · view"].choices isEqualToArray:@[@"Third person"]]);
+#else
+        assert(([byTitle[@"VR · view"].choices isEqualToArray:@[@"Third person",@"First person"]]));
+#endif
+#else
+        assert(byTitle[@"Show the Quest view"] && byTitle[@"Mac preview zoom (x)"]);
+        assert(byTitle[@"Head position (6DoF: lean, crouch)"]);
+        assert(byTitle[@"Stereo (the eyes rendered in turn)"]);
+        assert(byTitle[@"First person camera spring (ms, 0 = rigid)"]);
+#endif
+#if defined(GAME_BOTW160) || defined(TOTK_GAME_V143)
+        assert(([byTitle[@"Render resolution (per eye, immediate)"].choices isEqualToArray:@[@"0.625×　1280×1380",@"0.75×　1536×1656",@"0.875×　1792×1932",@"1.0×　2048×2208",@"1.25×　2560×2760",@"1.5×　3072×3312",@"1.75×　3584×3864",@"2.0×　4096×4416"]]));
+        assert(byTitle[@"Stream resolution (per eye)"]&&!byTitle[@"Stream resolution (per eye)"].set);
+#else
+        assert(([byTitle[@"VR · resolution (per eye)"].choices isEqualToArray:@[@"1344×1408",@"1680×1760",@"1920×2048",@"2048×2208"]]));
+#endif
+        puts("pass: supported VR settings rows");return 0;
+    }
+#ifdef TOTK_GAME_V143
+    if(argc==2&&!strcmp(argv[1],"aa")){aa_preferences_probe();return 0;}
+#endif
+    if (argc==2 && !strcmp(argv[1],"frame")) { frame_probe(); return 0; }
+    if (argc==2 && !strcmp(argv[1],"hdr")) { setenv("TOTK_UI_LANG","en",1); hdr_probe(); return 0; }
+    [NSApplication sharedApplication];
+    controller_map_default(fakeMap, fakeModes); setenv("TOTK_UI_LANG", "en", 1); unsetenv("TOTK_SOURCE_COMMIT");
+    fakeUsersCount = 2; fakeUsersActive = 0;   /* the store the User page reads (tests/test_users.c covers the files) */
+    snprintf(fakeUsers[0].name, sizeof fakeUsers[0].name, "Local");
+    snprintf(fakeUsers[1].name, sizeof fakeUsers[1].name, "Zelda");
+    for (int i = 0; i < 2; i++) { arc4random_buf(&fakeUsers[i].lo, sizeof fakeUsers[i].lo); arc4random_buf(&fakeUsers[i].hi, sizeof fakeUsers[i].hi); }
+    if (argc == 2 && !strcmp(argv[1], "shots")) { shots_probe(); puts(getenv("SHOTS_TEST_URL") ? "pass: screenshots page with pictures" : "pass: screenshots page"); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "nick")) { nick_probe(); puts(getenv("NICK_TEST_URL") ? "pass: nickname with the server" : "pass: nickname"); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "contrib")) { contrib_probe(); puts(getenv("CONTRIB_TEST_URL") ? "pass: contribution page with the server" : "pass: contribution page"); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "dsu")) {
+        window=probe_window();window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,1280,720)];
+        g_settings_page=SETTINGS_PAGE_INPUT;settings_show(1);
+        assert(row(@"DSU input") && row(@"DSU server").buttonAction);
+        pick(@"DSU controller slot", @"2");assert(fakeDSU.slot==2);
+        NSSwitch *toggle=(NSSwitch *)row(@"DSU input").control;toggle.state=NSControlStateValueOn;
+        [row(@"DSU input") changed:toggle];assert(fakeDSU.enabled);
+        settings_dsu_change(-1,0,@"localhost:1234");[settingsPanel refresh];
+        assert([row(@"DSU server").textLabel.stringValue isEqualToString:@"localhost:1234"]);
+        fakeDSUStatus=(RuntimeDSUStatus){.connected=1,.sensor=1,.buttons=1,.axes={128,255,0,128},.acc={0,0,-1},.gyro={10,-20,30}};
+        [settingsPanel refresh];assert([row(@"DSU status").textLabel.stringValue containsString:@"Connected"]);
+        assert([row(@"DSU status").textLabel.stringValue containsString:@"-20.0"]);
+        assert([row(@"DSU status").textLabel.stringValue containsString:@"L128,255 R0,128"]);
+        assert(row(@"DSU status").fullWidthText && row(@"DSU status").textLabel.bounds.size.width>600);
+        NSUInteger dsuRows=0;for(TOTKSettingRow *r in settingsPanel.rows)if([r.title hasPrefix:@"DSU "])dsuRows++;
+        assert(dsuRows==4);
+        footer_spacing_probe();
+        for(const char **language=(const char *[]){"en","zh",NULL};*language;language++){
+            setenv("TOTK_UI_LANG",*language,1);settings_rebuild();[settingsPanel selectPage:SETTINGS_PAGE_INPUT];[settingsPanel refresh];
+            const char *png=getenv("DSU_TEST_PNG");if(png){
+                NSBitmapImageRep *rep=[settingsPanel bitmapImageRepForCachingDisplayInRect:settingsPanel.bounds];
+                [settingsPanel cacheDisplayInRect:settingsPanel.bounds toBitmapImageRep:rep];
+                NSString *file=[NSString stringWithFormat:@"%s-%s.png",png,*language];
+                assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:file atomically:YES]);
+            }
+        }
+        fakeDSUStatus.connected=fakeDSUStatus.sensor=0;[settingsPanel refresh];
+        assert([row(@"DSU 状态").textLabel.stringValue containsString:@"等待"]);
+        fakeDSU.locked=1;settings_rebuild();assert(!row(@"DSU 输入（环境变量指定）").control.enabled && !row(@"DSU 服务器").buttonAction);
+        [settingsPanel.timer invalidate];puts("pass: DSU settings, live status, localization and environment lock");return 0;
+    }
+    if (argc == 2) { persistence_probe(argv[1]); puts("pass: settings persistence"); return 0; }
+    unsetenv("TOTK_MFX"); /* priority/disabled row covered by the headless frame probe */
+    setenv("TOTK_OUTPUT_RES", "2560x1440", 1);   /* the native size the resolution row names */
+    settings_test_output_init();
+    // In-memory fixture only: do not start the timer or touch a player's profile.
+    playtime=[[TOTKPlaytime alloc] initWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
+    window = probe_window();
+    window.contentView = [[TOTKInputView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
+    if (hud_compact()) { TOTKHudBox *box = [[TOTKHudBox alloc] initWithFrame:NSZeroRect]; [window.contentView addSubview:box]; hudBox = box; }
+
+    /* Key 1 opens it; a held key acts once. */
+    runtime_input_key_synthetic(18, 1); runtime_input_key_synthetic(18, 1); tick(); runtime_input_key_synthetic(18, 0); tick();
+    assert(settingsOpen && fakeSettingsCapture && settingsPanel && !settingsPanel.hidden && settingsPanel.superview == window.contentView);
+    assert(NSContainsRect(window.contentView.bounds, settingsPanel.frame));
+    assert(settingsPanel.allRows.count == 32 + 3*TOTK_V143 + BOTW_V190 + (TOTK_V143 && totk_hdr_available() ? SETTINGS_HDR_ROWS : 0));   /* + the HDR rows (PR #1129) */   /* 17 (anisotropy last on the display page, controller
+                                                                 background input on the input page), the user page's
+                                                                 two, then the effects page: FOV, two distances, shadows,
+                                                                 depth of field, FXAA, sharpening and effect switches
+                                                                 (1.4.3, and Breath of the Wild 1.9.0 with its shadow
+                                                                 resolution and AO live), or eight greyed rows */
+
+    /* Native 4K modes as game_patches.c serves them for 1.2.1 (the fixture swaps in a 4K swapchain); off again before
+       the rows below read the mode. */
+#ifndef GAME_BOTW
+    settings_test_output_4k(1);
+    assert(runtime_output_modes() & 1 << OUTPUT_MODE_NATIVE_4K);
+    unsigned nw4 = 0, nh4 = 0;
+    assert(runtime_output_native(OUTPUT_MODE_NATIVE_4K, &nw4, &nh4) && nw4 == 3840 && nh4 == 2160);
+    assert(runtime_output_native(OUTPUT_MODE_NATIVE, &nw4, &nh4) && nw4 == 2560 && nh4 == 1440);   /* native stays 2K */
+    assert(runtime_output_mode_set(OUTPUT_MODE_NATIVE_4K));
+    assert(runtime_output_mode() == OUTPUT_MODE_NATIVE_4K);
+    assert(runtime_output_mode_set(OUTPUT_MODE_OFF) && runtime_output_mode() == OUTPUT_MODE_OFF);
+    settings_test_output_4k(0);
+#endif
+
+    /* FPS graph: a switch (here off at start; frontend.m turns it on when nothing is saved), kept in fps-graph.txt
+       that both games share (user 2026-10-29). */
+    assert(!switched(@"FPS graph"));
+    int shared0 = sharedSaves;
+    flip(@"FPS graph", YES); assert(fpsGraphEnabled && !strcmp(savedName, "fps-graph.txt") && !strcmp(savedWord, "on") && sharedSaves == shared0 + 1);
+    flip(@"FPS graph", NO); assert(!fpsGraphEnabled && !strcmp(savedWord, "off") && sharedSaves == shared0 + 2);
+
+    /* Overlay: all -> FPS + playtime -> off; the corner box follows. */
+    hud_publish(HUD_FPS, "FPS 60  2560x1440", 0); hud_publish(HUD_SHADER, "New shaders 3 / total 9", 0);
+    shows(@"Overlay", @"All");
+    /* user 2026-11-18: no notes in brackets, the choices in reverse, "FPS 全信息" renamed and last */
+    assert([menu(@"Overlay").itemTitles isEqualToArray:(@[@"Off", @"Bare FPS", @"FPS + playtime", @"All", @"FPS and frame debug info"])]);
+    pick(@"Overlay", @"FPS + playtime"); assert(fps_overlay_hud_mode() == HUD_MODE_MINIMAL);
+    if (hudBox) { TOTKHudBox *b = (TOTKHudBox *)hudBox; assert(!b.hidden && [b.label.stringValue isEqualToString:@"FPS 60  2560x1440\nSession  0 h 00 m | Total  0 h 00 m\nSettings: key 1 · controller L3 + R3"]); }   /* the last line: how to open this panel (a DualSense connected) */
+    /* Bare FPS (user 2026-11-18: "极简fps 只显示 fps和分辨率， 放大3倍（只有这个 放大3倍）"): the FPS line alone, at three
+       times the font of the other modes. */
+    CGFloat usual = 0; if (hudBox) usual = [[((TOTKHudBox *)hudBox).label.attributedStringValue attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] pointSize];
+    pick(@"Overlay", @"Bare FPS"); assert(fps_overlay_hud_mode() == HUD_MODE_BARE);
+    assert(hud_line_shown(HUD_FPS) && !hud_line_shown(HUD_SHADER) && !hud_line_shown(HUD_LOAD));
+    if (hudBox) { TOTKHudBox *b = (TOTKHudBox *)hudBox; assert(!b.hidden && [b.label.stringValue isEqualToString:@"FPS 60  2560x1440"]);
+        NSFont *font = [b.label.attributedStringValue attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+        assert(usual > 0 && fabs(font.pointSize - HUD_BARE_SCALE * usual) < 0.01); }
+    { fps_overlay_info info = {.fps = 46, .screen_w = 2560, .screen_h = 1440, .mfx = 1, .gen = 0, .big = 1, .scene_w = 1707, .scene_h = 960}; char line[96];
+      fps_overlay_text(&info, line, sizeof line); assert(!strcmp(line, "FPS 46  2560x1440"));   /* no internal size, MetalFX or 2K mark */
+      pick(@"Overlay", @"FPS + playtime"); fps_overlay_text(&info, line, sizeof line); assert(strstr(line, "(1707x960)") && strstr(line, "MetalFX")); }
+    if (hudBox) assert(fabs([[((TOTKHudBox *)hudBox).label.attributedStringValue attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] pointSize] - usual) < 0.01);   /* only that mode is larger */
+    pick(@"Overlay", @"Off"); assert(fps_overlay_hud_mode() == HUD_MODE_OFF && (!hudBox || hudBox.hidden));
+    pick(@"Overlay", @"All");
+    if (hudBox) assert(!hudBox.hidden && [((TOTKHudBox *)hudBox).label.stringValue containsString:@"New shaders"]);
+
+    if (hudBox) assert([((TOTKHudBox *)hudBox).label.stringValue containsString:@"Session  0 h 00 m | Total  0 h 00 m"]);
+
+    /* Frame lock: off -> 30 -> 60 -> off. */
+    shows(@"Frame lock", @"Off");
+    pick(@"Frame lock", @"30 fps"); assert(fakeLock == 30);
+    pick(@"Frame lock", @"40 fps"); assert(fakeLock == 40);
+    pick(@"Frame lock", @"60 fps"); assert(fakeLock == 60);
+    pick(@"Frame lock", @"72 fps"); assert(fakeLock == 72);
+    pick(@"Frame lock", @"90 fps"); assert(fakeLock == 90);
+    pick(@"Frame lock", @"120 fps"); assert(fakeLock == 120);
+    pick(@"Frame lock", @"Off"); assert(fakeLock == 0);
+    nvn_fps_lock_set(60); shows(@"Frame lock", @"60 fps"); nvn_fps_lock_set(0);
+    /* Frame lock and interpolation exclude each other: picking one turns the other off, both rows show it at once. */
+    mfx_set(MFX_30); mfx_latch(); [settingsPanel refresh];
+    pick(@"Frame lock", @"60 fps");
+    assert(fakeLock == 60 && mfx_requested() == MFX_OFF && [menu(@"Frame interpolation").titleOfSelectedItem isEqualToString:@"Off"]);
+    pick(@"Frame interpolation", @"30+30");
+    assert(fakeLock == 0 && mfx_requested() == MFX_30 && [menu(@"Frame lock").titleOfSelectedItem isEqualToString:@"Off"]);
+    pick(@"Frame interpolation", @"Off"); assert(fakeLock == 0);   /* interpolation off leaves the lock off */
+    pick(@"Frame lock", @"30 fps"); pick(@"Frame lock", @"Off"); assert(mfx_requested() == MFX_OFF);
+
+    /* Frame interpolation: the pick shows at once (the game takes it at its next frame); a change elsewhere shows too. */
+    mfx_set(MFX_OFF); mfx_latch(); shows(@"Frame interpolation", @"Off");
+    pick(@"Frame interpolation", @"30+30"); assert(mfx_requested() == MFX_30); shows(@"Frame interpolation", @"30+30");
+    mfx_latch(); assert(mfx_enabled() == MFX_30);
+    mfx_set(MFX_MAX); shows(@"Frame interpolation", @"Unlimited");
+    pick(@"Frame interpolation", @"40+40"); assert(mfx_requested() == MFX_40);
+    pick(@"Frame interpolation", @"50+50"); assert(mfx_requested() == MFX_50);
+    pick(@"Frame interpolation", @"60+60"); assert(mfx_requested() == MFX_60);
+    assert(menu(@"Frame interpolation").numberOfItems == 6 && menu(@"Frame lock").numberOfItems == 7);
+    pick(@"Frame interpolation", @"Off"); mfx_latch(); assert(!mfx_enabled());
+
+    /* Resolution: the player picks; 1080p without MetalFX at the start. */
+    mfxup_output_set(0); mfxup_set(0); shows(@"Resolution", @"1080p");
+    BOOL nativeResolution = !!(runtime_output_modes() & (1 << OUTPUT_MODE_NATIVE));
+    if (nativeResolution) {
+    BOOL mfx720 = !!(runtime_output_modes() & (1 << OUTPUT_MODE_720P_METALFX));   /* Tears of the Kingdom; not Breath of the Wild */
+    assert(menu(@"Resolution").numberOfItems == 5 + mfx720 && [menu(@"Resolution").itemTitles.firstObject isEqualToString:@"720p"]);
+    if (mfx720) {
+    pick(@"Resolution", @"720p + MetalFX upscaling");   /* the 720p canvas, MetalFX scaling it to a 1080p window */
+    assert(runtime_output_mode() == OUTPUT_MODE_720P_METALFX && mfxup_output_enabled() && runtime_output_size_current() == SIZE(1280, 720));
+    window_is(1080);
+    } else assert(!runtime_output_mode_set(OUTPUT_MODE_720P_METALFX));
+    pick(@"Resolution", @"720p"); assert(runtime_output_mode() == OUTPUT_MODE_720P && !mfxup_output_enabled() && runtime_output_size_current() == SIZE(1280, 720));
+    window_is(720);
+    } else {
+        assert(menu(@"Resolution").numberOfItems == 2);
+        assert([menu(@"Resolution") indexOfItemWithTitle:@"720p"] < 0);
+        assert(!runtime_output_mode_set(OUTPUT_MODE_720P) && !runtime_output_mode_set(OUTPUT_MODE_720P_METALFX) && !runtime_output_mode_set(OUTPUT_MODE_NATIVE));
+    }
+    pick(@"Resolution", @"1080p + MetalFX upscaling");
+    assert(runtime_output_mode() == OUTPUT_MODE_METALFX && mfxup_output_enabled() && runtime_output_size_current() == SIZE(1920, 1080));
+    if (nativeResolution) {
+    pick(@"Resolution", @"2K (2560×1440)");
+    assert(runtime_output_mode() == OUTPUT_MODE_NATIVE && !mfxup_output_enabled() && runtime_output_size_current() == SIZE(2560, 1440));
+    window_is(1440);   /* the window takes the picked size at once */
+    }
+    pick(@"Resolution", @"1080p");
+    assert(runtime_output_mode() == OUTPUT_MODE_OFF && !mfxup_output_enabled() && runtime_output_size_current() == SIZE(1920, 1080));
+    window_is(1080);
+    if (nativeResolution) {
+        settings_test_output_size(2560, 1440); shows(@"Resolution", @"2K (2560×1440)");   /* set elsewhere: shown */
+        settings_test_output_size(1920, 1080);
+    }
+
+    /* Aspect ratio: fixed at 16:9 while the game cannot change it; offered once its code is in (the next opening). */
+    assert(!menu(@"Aspect ratio").enabled && [menu(@"Aspect ratio").titleOfSelectedItem isEqualToString:@"16:9"]);
+    settings_test_aspect_init(1.6);
+    key_event(53, YES); key_event(53, NO); assert(!settingsOpen && settingsPanel.hidden);   /* Esc closes it */
+    press(18); assert(settingsOpen);
+    /* 16:9, 16:10, 21:9, 32:9 (no fitting the window any more); the window takes each shape at once. */
+    assert(menu(@"Aspect ratio").enabled && menu(@"Aspect ratio").numberOfItems == 4 && [menu(@"Aspect ratio") indexOfItemWithTitle:@"Fit to window"] < 0);
+    pick(@"Aspect ratio", @"16:10"); assert(fabsf(runtime_aspect_ratio() - 1.6f) < 0.001f && fabsf(runtime_aspect_now() - 1.6f) < 0.001f);
+    tick(); shaped(16.0 / 10);
+    pick(@"Aspect ratio", @"32:9"); assert(fabsf(runtime_aspect_now() - 32.0f / 9) < 0.001f);
+    tick(); shaped(32.0 / 9);
+    pick(@"Aspect ratio", @"21:9"); assert(fabsf(runtime_aspect_now() - 21.0f / 9) < 0.001f);
+    tick(); shaped(21.0 / 9);
+    pick(@"Aspect ratio", @"16:9"); assert(runtime_aspect_now() == 0 && fabsf(runtime_aspect_ratio() - 16.0f / 9) < 0.001f);
+    tick(); shaped(16.0 / 9);
+    /* 2K + MetalFX for a 4K screen: the 2K canvas, the MetalFX output stage on, a 3840x2160 window (as far as the screen holds). */
+    if (nativeResolution) {
+    pick(@"Resolution", @"2K + MetalFX upscaling (4K screens)");
+    assert(runtime_output_mode() == OUTPUT_MODE_NATIVE_METALFX && runtime_output_size_current() == SIZE(2560, 1440) && mfxup_output_enabled());
+    window_is(2160);
+    pick(@"Resolution", @"2K (2560×1440)"); assert(runtime_output_mode() == OUTPUT_MODE_NATIVE && !mfxup_output_enabled());
+    window_is(1440);
+    } else assert([menu(@"Resolution") indexOfItemWithTitle:@"2K + MetalFX upscaling (4K screens)"] < 0);
+    pick(@"Resolution", @"1080p"); assert(runtime_output_size_current() == SIZE(1920, 1080)); window_is(1080);
+
+    /* Switches. */
+    /* Edge smoothing: off / fast (one compute pass) / MetalFX (after ishaanzee's fork, 94f13c98). */
+    shows(@"Edge smoothing", @"Off"); pick(@"Edge smoothing", @"Fast"); assert(taa_enabled() && taa_fast_enabled()); shows(@"Edge smoothing", @"Fast");
+    pick(@"Edge smoothing", @"MetalFX"); assert(taa_enabled() && !taa_fast_enabled()); shows(@"Edge smoothing", @"MetalFX");
+    pick(@"Edge smoothing", @"Off"); assert(!taa_enabled()); shows(@"Edge smoothing", @"Off");
+    /* Stronger ambient occlusion (PR #1316): off by default; every level acts at once (the Mac's shaders always carry the
+       parameters) and is saved; a run without them (TOTK_SSAO=0) shows off, greyed out (rows are made at each opening). */
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW190) || defined(TOTK_GAME_V121)
+    shows(@"Stronger ambient occlusion", @"Off (as the game has it)"); assert(fakeSsaoStart == -1);
+    pick(@"Stronger ambient occlusion", @"1.5×"); assert(settingsSsao == 150 && fakeSsaoSet == 150 && !strcmp(savedName, "ssao.txt") && !strcmp(savedWord, "150"));
+    pick(@"Stronger ambient occlusion", @"2×"); assert(fakeSsaoSet == 200 && !strcmp(savedWord, "200"));
+    pick(@"Stronger ambient occlusion", @"Off (as the game has it)"); assert(!settingsSsao && fakeSsaoSet == 0 && !strcmp(savedWord, "off"));
+    press(18); fakeSsaoLive = 0; press(18); assert(settingsOpen && !menu(@"Stronger ambient occlusion").enabled);
+    press(18); fakeSsaoLive = 1; press(18); assert(settingsOpen && menu(@"Stronger ambient occlusion").enabled);
+#else
+    shows(@"Stronger ambient occlusion", @"Not in this version"); assert(!menu(@"Stronger ambient occlusion").enabled);
+#endif
+    /* The effects page (2026-10-30): the two distances (1.4.3 only) and a switch per effect, each in force and saved at once. */
+#ifdef TOTK_GAME_V143
+    shows(@"Model detail distance (LOD)", @"1x (as the game has it)"); shows(@"Render distance", @"1x (as the game has it)");
+    pick(@"Model detail distance (LOD)", @"4×"); assert(runtime_lod_scale() == 4 && !strcmp(savedName, "graphics-lod.txt") && !strcmp(savedWord, "400"));
+    pick(@"Render distance", @"3×"); assert(runtime_far_scale() == 3 && !strcmp(savedName, "graphics-far.txt") && !strcmp(savedWord, "300"));
+    pick(@"Model detail distance (LOD)", @"100×"); assert(runtime_lod_scale() == 100 && !strcmp(savedWord, "10000"));
+    pick(@"Render distance", @"10×"); assert(runtime_far_scale() == 10 && !strcmp(savedWord, "1000"));
+    pick(@"Model detail distance (LOD)", @"Always the finest"); assert(runtime_lod_scale() >= 1e6 && !strcmp(savedWord, "max"));
+    shows(@"Shadow resolution", @"1x (as the game has it, 800)");
+    pick(@"Shadow resolution", @"2×（1600）"); assert(runtime_shadow_scale() == 2 && !strcmp(savedName, "graphics-effects.txt"));
+    pick(@"Shadow resolution", @"1x (as the game has it, 800)"); assert(runtime_shadow_scale() == 1);
+    shows(@"Field of view (FOV)", @"1x (as the game has it)");
+    pick(@"Field of view (FOV)", @"1.2×"); assert(runtime_fov_scale() == 1.2 && !strcmp(savedName, "graphics-fov.txt") && !strcmp(savedWord, "120"));
+    pick(@"Field of view (FOV)", @"1x (as the game has it)");
+    shows(@"Anti-aliasing method",@"FXAA");shows(@"Anti-aliasing quality",@"Original");
+    assert(menu(@"Anti-aliasing method").numberOfItems==3);
+    [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS];
+    settingsPanel.controllerIndex=(NSInteger)[settingsPanel.rows indexOfObject:row(@"Anti-aliasing method")];
+    BOOL wasControllerActive=g_settings_controller_active;g_settings_controller_active=YES;[settingsPanel controllerHighlight];
+    pick(@"Anti-aliasing method",@"Off");tick();assert(!fakeFxaa&&!fakeSmaa&&!atomic_load(&g_fin_fxaa_quality));
+    for(TOTKSettingRow *r in settingsPanel.allRows)assert(![r.title isEqualToString:@"Anti-aliasing quality"]);
+    assert(settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex]==row(@"Anti-aliasing method").control.superview);
+    pick(@"Anti-aliasing method",@"SMAA");tick();shows(@"Anti-aliasing quality",@"High");
+    assert(fakeSmaa&&fakeFxaa&&!strcmp(savedName,"graphics-aa-method.txt")&&!strcmp(savedWord,"2"));
+    assert(menu(@"Anti-aliasing quality").numberOfItems==4);
+    pick(@"Anti-aliasing quality",@"Low");assert(fakeSmaaQuality==0);
+    pick(@"Anti-aliasing quality",@"Medium");assert(fakeSmaaQuality==1);
+    pick(@"Anti-aliasing quality",@"Ultra");assert(fakeSmaaQuality==3);
+    pick(@"Anti-aliasing method",@"FXAA");tick();shows(@"Anti-aliasing quality",@"Original");
+    assert(menu(@"Anti-aliasing quality").numberOfItems==2);
+    pick(@"Anti-aliasing quality",@"Quality");assert(fakeFxaaQuality==1&&atomic_load(&g_fin_fxaa_quality));
+    pick(@"Anti-aliasing method",@"SMAA");tick();shows(@"Anti-aliasing quality",@"Ultra");
+    assert(!atomic_load(&g_fin_fxaa_quality));   /* remembered FXAA quality never runs alongside SMAA */
+    pick(@"Anti-aliasing method",@"Off");tick();assert(fakeFxaaQuality==1&&fakeSmaaQuality==3);
+    pick(@"Anti-aliasing method",@"FXAA");tick();shows(@"Anti-aliasing quality",@"Quality");
+    assert(atomic_load(&g_fin_fxaa_quality));
+    pick(@"Anti-aliasing quality",@"Original");assert(!atomic_load(&g_fin_fxaa_quality));
+    for(TOTKSettingRow *r in settingsPanel.allRows)assert(![r.title hasPrefix:@"SMAA edge sensitivity"]&&![r.title hasPrefix:@"SMAA blend amount"]);
+    g_settings_controller_active=wasControllerActive;[settingsPanel controllerHighlight];
+    assert(switched(@"Depth of field")); flip(@"Depth of field", NO); assert(!runtime_dof_on() && !strcmp(savedName, "graphics-dof.txt") && !strcmp(savedWord, "off"));
+    pick(@"Sharpening", @"50%"); assert(fakeSharpen == 50 && !strcmp(savedName, "graphics-sharpen.txt") && !strcmp(savedWord, "50"));
+    pick(@"Sharpening", @"Off (as the game has it)"); assert(!fakeSharpen);
+    /* "Reset to defaults" (the effects page's bottom right): every row back to the game's own, the files removed. */
+    pick(@"Field of view (FOV)", @"1.3×"); pick(@"Model detail distance (LOD)", @"10×"); pick(@"Render distance", @"5×");
+    pick(@"Anti-aliasing method",@"SMAA");tick();pick(@"Anti-aliasing quality",@"High"); pick(@"Sharpening", @"75%"); flip(@"Bloom", NO);
+    [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS]; tick();
+    NSButton *resetEffects = settingsPanel.effectsButtons[0];
+    assert(!resetEffects.hidden && [resetEffects.title isEqualToString:@"Reset to defaults"] && [settingsPanel.controllerTargets containsObject:resetEffects]);
+    [resetEffects performClick:nil]; tick();
+    assert(runtime_fov_scale() == 1 && runtime_lod_scale() == 1 && runtime_far_scale() == 1 && fakeFxaa && !fakeSmaa && !fakeSharpen && fakeFxOn[0] && fakeFxOn[1] && !fakeAniso);
+    assert(strstr(removedAll,"graphics-aa-method.txt "));
+    assert(fakeSmaaQuality==2&&!fakeFxaaQuality);
+    assert(!strcmp(removedName, "graphics-dof.txt") && settingsPanel.page == SETTINGS_PAGE_EFFECTS && runtime_dof_on());   /* the last file the reset removes */
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
+    pick(@"Model detail distance (LOD)", @"1x (as the game has it)"); pick(@"Render distance", @"1x (as the game has it)"); assert(runtime_lod_scale() == 1 && runtime_far_scale() == 1);
+    assert(switched(@"Bloom")); flip(@"Bloom", NO); assert(!fakeFxOn[1] && !strcmp(savedName, "graphics-effects.txt") && !strcmp(savedWord, "bloom"));
+    flip(@"Ambient occlusion", NO); assert(!strcmp(savedWord, "ao bloom"));
+    flip(@"Bloom", YES); flip(@"Ambient occlusion", YES); assert(fakeFxOn[0] && fakeFxOn[1] && !strcmp(savedWord, "none"));
+#else
+    /* Shadow resolution (Breath of the Wild 1.9.0, the production calls of game_patches_botw.c): the next launch's choice,
+       saved in shadows.txt (this run keeps the size it started with: tests/test_botw_shadow_res.c); greyed out while
+       TOTK_SHADOW_RES decides (rows are made at each opening). */
+#  ifdef GAME_BOTW190
+    assert([row(@"Shadow resolution").title isEqualToString:@"Shadow resolution (from the next launch)"]);
+    shows(@"Shadow resolution", @"As the game has it");
+    pick(@"Shadow resolution", @"2048 per cascade"); assert(runtime_shadow_res_saved() == 2048 && !strcmp(savedName, "shadows.txt") && !strcmp(savedWord, "2048"));
+    shows(@"Shadow resolution", @"2048 per cascade");
+    pick(@"Shadow resolution", @"As the game has it"); assert(!runtime_shadow_res_saved() && !strcmp(savedWord, "off"));
+    press(18); setenv("TOTK_SHADOW_RES", "2048", 1); press(18); assert(settingsOpen && !menu(@"Shadow resolution").enabled);
+    shows(@"Shadow resolution", @"Set by TOTK_SHADOW_RES");
+    press(18); unsetenv("TOTK_SHADOW_RES"); press(18); assert(settingsOpen && menu(@"Shadow resolution").enabled);
+    /* Where the patch does not act (ios_code(): the iOS export's run here, the device's code there) nothing is offered. */
+    press(18); setenv("TOTK_EXPORT_IOS", "/nonexistent", 1); press(18); assert(settingsOpen && !menu(@"Shadow resolution").enabled);
+    shows(@"Shadow resolution", @"Not in this version");
+    press(18); unsetenv("TOTK_EXPORT_IOS"); press(18); assert(settingsOpen && menu(@"Shadow resolution").enabled);
+    /* "Reset to defaults" sets it back to the game's own and removes shadows.txt. */
+    /* The effect switches (PR #1602): ambient occlusion acts at once and is saved as on 1.4.3; the others greyed. */
+    shows(@"Bloom", @"Not in this version"); assert(!menu(@"Bloom").enabled);
+    assert(switched(@"Ambient occlusion")); flip(@"Ambient occlusion", NO);
+    assert(!fakeFxOn[0] && !strcmp(savedName, "graphics-effects.txt") && !strcmp(savedWord, "ao"));
+    shows(@"Depth of field", @"Not in this version"); shows(@"Model detail distance (LOD)", @"Not in this version");
+    /* FXAA and sharpening (gfx/nvn/botw_finish.h): 1.4.3's rows and files; while MetalFX replaces the FXAA / upscale draw
+       the FXAA row says so (rows are made at each opening). */
+    assert(switched(@"FXAA anti-aliasing")); flip(@"FXAA anti-aliasing", NO);
+    assert(!fakeFxaa && !strcmp(savedName, "graphics-fxaa.txt") && !strcmp(savedWord, "off"));
+    pick(@"Sharpening", @"75%"); assert(fakeSharpen == 75 && !strcmp(savedName, "graphics-sharpen.txt") && !strcmp(savedWord, "75"));
+    press(18); fakeFxaaReplaced = 1; press(18); assert(settingsOpen && !menu(@"FXAA anti-aliasing").enabled);
+    shows(@"FXAA anti-aliasing", @"MetalFX replaces it"); assert(menu(@"Sharpening").enabled);
+    press(18); fakeFxaaReplaced = 0; press(18); assert(settingsOpen && switched(@"FXAA anti-aliasing") == NO);
+    /* "Reset to defaults" sets them back to the game's own and removes shadows.txt, graphics-effects.txt,
+       graphics-fxaa.txt and graphics-sharpen.txt. */
+    pick(@"Shadow resolution", @"2048 per cascade"); [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS]; tick();
+    removedAll[0] = 0; [settingsPanel.effectsButtons[0] performClick:nil]; tick();
+    assert(!runtime_shadow_res_saved() && fakeFxOn[0] && strstr(removedAll, "shadows.txt ") && strstr(removedAll, "graphics-effects.txt "));
+    assert(fakeFxaa && !fakeSharpen && strstr(removedAll, "graphics-fxaa.txt ") && strstr(removedAll, "graphics-sharpen.txt "));
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
+    /* The field of view (Breath of the Wild 1.9.0, the production calls of game_patches_botw.c; the stub itself:
+       tests/test_botw_fov.c): 1x, as the game has it; each choice acts at once and is saved in graphics-fov.txt (x100). */
+    settings_test_fov_init(); assert(!settings_test_fov_word());
+    shows(@"Field of view (FOV)", @"1x (as the game has it)");
+    assert(menu(@"Field of view (FOV)").numberOfItems == 6 && [[menu(@"Field of view (FOV)") itemTitleAtIndex:5] isEqual:@"1.5×"]);   /* 1x up */
+    pick(@"Field of view (FOV)", @"1.2×"); assert(runtime_fov_scale() == 1.2 && !strcmp(savedName, "graphics-fov.txt") && !strcmp(savedWord, "120"));
+    assert(settings_test_fov_word() == float_bits(1.2f));   /* the word the stub reads, at once */
+    runtime_fov_scale_set(0); runtime_fov_scale_set(-1); runtime_fov_scale_set(NAN); runtime_fov_scale_set(3);
+    assert(runtime_fov_scale() == 1.2 && settings_test_fov_word() == float_bits(1.2f));   /* outside 0.5..2: never taken */
+    press(18); setenv("TOTK_FOV_SCALE", "1.3", 1); press(18); assert(settingsOpen && !menu(@"Field of view (FOV)").enabled);
+    shows(@"Field of view (FOV)", @"1.2×");
+    press(18); unsetenv("TOTK_FOV_SCALE"); press(18); assert(settingsOpen && menu(@"Field of view (FOV)").enabled);
+    press(18); setenv("TOTK_EXPORT_IOS", "/nonexistent", 1); press(18); assert(settingsOpen && !menu(@"Field of view (FOV)").enabled);
+    shows(@"Field of view (FOV)", @"Not in this version");
+    press(18); unsetenv("TOTK_EXPORT_IOS"); press(18); assert(settingsOpen && menu(@"Field of view (FOV)").enabled);
+    press(18); settings_test_fov_refused(1); press(18); assert(settingsOpen && !menu(@"Field of view (FOV)").enabled);
+    shows(@"Field of view (FOV)", @"Not in this version");   /* the camera code was not as shipped: nothing patched */
+    press(18); settings_test_fov_refused(0); press(18); assert(settingsOpen && menu(@"Field of view (FOV)").enabled);
+    /* "Reset to defaults" sets it back to 1x and removes graphics-fov.txt. */
+    pick(@"Field of view (FOV)", @"1.3×"); [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS]; tick();
+    removedAll[0] = 0; [settingsPanel.effectsButtons[0] performClick:nil]; tick();
+    assert(runtime_fov_scale() == 1 && settings_test_fov_word() == float_bits(1.0f) && strstr(removedAll, "graphics-fov.txt "));
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
+#  else
+    shows(@"Shadow resolution", @"Not in this version"); assert(!menu(@"Shadow resolution").enabled);
+    shows(@"Field of view (FOV)", @"Not in this version"); assert(!menu(@"Field of view (FOV)").enabled);
+#  endif
+    shows(@"Render distance", @"Not in this version"); assert(!menu(@"Render distance").enabled);
+#  ifndef GAME_BOTW190
+    shows(@"Effect switches", @"Not in this version");
+    shows(@"Sharpening", @"Not in this version");
+#  endif
+#endif
+    /* Anisotropic filtering (effects page, every version): in force at once. */
+    shows(@"Anisotropic filtering", @"Off (as the game has it)");
+    pick(@"Anisotropic filtering", @"16×"); assert(fakeAniso == 16 && !strcmp(savedName, "graphics-aniso.txt") && !strcmp(savedWord, "16"));
+    shows(@"Anisotropic filtering", @"16×");
+    assert(!switched(@"Mouse")); flip(@"Mouse", YES); assert(fakeMouse && switched(@"Mouse")); flip(@"Mouse", NO); assert(!fakeMouse);
+
+    /* The DualSense bow trigger: a switch; greyed out while TOTK_DUALSENSE_TRIGGERS or a test session decides, and on a
+       game version without the bow's state (rows are made at each opening). */
+#ifdef GAME_BOTW160
+    shows(@"DualSense bow trigger", @"Not in this version");
+    assert(!menu(@"DualSense bow trigger").enabled);
+#else
+    assert(switched(@"DualSense bow trigger")); flip(@"DualSense bow trigger", NO); assert(!fakeTriggers && !switched(@"DualSense bow trigger"));
+    flip(@"DualSense bow trigger", YES); assert(fakeTriggers);
+    press(18); fakeTriggersLocked = 1; fakeTriggers = 0; press(18); assert(settingsOpen);
+    assert(!menu(@"DualSense bow trigger").enabled && [menu(@"DualSense bow trigger").titleOfSelectedItem isEqualToString:@"Off"]);
+    press(18); fakeTriggersLocked = 0; fakeTriggersAvailable = 0; press(18);
+    assert(!menu(@"DualSense bow trigger").enabled && [menu(@"DualSense bow trigger").titleOfSelectedItem isEqualToString:@"Not in this version"]);
+    press(18); fakeTriggersAvailable = 1; fakeTriggers = 1; press(18); assert(settingsOpen && switched(@"DualSense bow trigger"));
+#endif
+
+    /* Controller type: auto names the controller it sees. */
+    shows(@"Controller type", @"Auto (PlayStation)");
+    pick(@"Controller type", @"Switch"); assert(fakePadType == GAMEPAD_TYPE_SWITCH);
+    pick(@"Controller type", @"Auto (PlayStation)"); assert(fakePadType == GAMEPAD_TYPE_AUTO);
+    fakePadDetected = -1; shows(@"Controller type", @"Auto (no controller)");
+#if TOTK_V143
+    /* Style changes publish immediately and leave controller routing alone. */
+    shows(@"Button prompts", @"Auto");
+    pick(@"Button prompts", @"PlayStation");
+    PromptBindings prompt;
+    runtime_prompt_snapshot(&prompt); assert(prompt.device == PROMPT_PLAYSTATION);
+    assert(fakePadType == GAMEPAD_TYPE_AUTO);
+    pick(@"Button prompts", @"Keyboard / mouse");
+    runtime_prompt_snapshot(&prompt); assert(prompt.device == PROMPT_KEYBOARD);
+    pick(@"Button prompts", @"Auto");
+#endif
+
+
+    assert(!switched(@"Controller input in background"));
+    flip(@"Controller input in background", YES); assert(fakePadBackground && switched(@"Controller input in background"));
+    flip(@"Controller input in background", NO); assert(!fakePadBackground && !switched(@"Controller input in background"));
+
+    /* Rumble, its strength and gyro aiming. */
+    assert(switched(@"Rumble")); flip(@"Rumble", NO); assert(!fakeFeedback[0] && !switched(@"Rumble")); flip(@"Rumble", YES); assert(fakeFeedback[0]);
+    shows(@"Rumble strength", @"1× (default)");
+    pick(@"Rumble strength", @"2×"); assert(fakeGain == 2); shows(@"Rumble strength", @"2×");
+    pick(@"Rumble strength", @"0.5×"); assert(fakeGain == 0.5f); pick(@"Rumble strength", @"1× (default)"); assert(fakeGain == 1);
+    assert(switched(@"Gyro aiming")); flip(@"Gyro aiming", NO); assert(!fakeFeedback[1]); flip(@"Gyro aiming", YES); assert(fakeFeedback[1]);
+    /* Rows are made at each opening: a variable that decides (greyed out), a device the run started without (the next
+       launch), a strength the file holds that is not a choice. */
+    press(18); fakeFeedbackLocked[1] = 1; fakeFeedbackPresent[0] = 0; fakeGain = 2.5f; press(18); assert(settingsOpen);
+    assert(!menu(@"Gyro aiming").enabled && [menu(@"Gyro aiming").titleOfSelectedItem isEqualToString:@"On"]);
+    (void)row(@"Rumble (from the next launch)"); flip(@"Rumble (from the next launch)", NO); assert(!fakeFeedback[0]);
+    shows(@"Rumble strength", @"2.5×"); pick(@"Rumble strength", @"3×"); assert(fakeGain == 3);
+    press(18); fakeGainLocked = 1; press(18); assert(!menu(@"Rumble strength").enabled && [menu(@"Rumble strength").titleOfSelectedItem isEqualToString:@"3×"]);
+    press(18); fakeFeedbackLocked[1] = 0; fakeFeedbackPresent[0] = 1; fakeFeedback[0] = 1; fakeGainLocked = 0; fakeGain = 1; press(18); assert(settingsOpen);
+    assert(switched(@"Rumble") && menu(@"Rumble strength").enabled);
+
+    /* Users: the page shows the user this run opened with, and a pop-up for the next launch's user; the pick marks
+       the user and makes the row again; the footer button names a new user in the game's text bar — the panel closes
+       while the bar is up and comes back with the users read again. */
+    [settingsPanel selectPage:SETTINGS_PAGE_USERS];
+    assert(settingsPanel.rows.count == 2 && !row(@"User this run").control.enabled &&
+           [menu(@"User this run").titleOfSelectedItem isEqualToString:@"Local"]);
+    shows(@"User (from the next launch)", @"Local");
+    assert(settingsPanel.controllerTargets.count == 4 && settingsPanel.controllerTargets.lastObject == settingsPanel.homeButton);   /* the rows, 添加用户…, 访问主页 */
+    {   /* All pages fit, including the user page's two rows. */
+        NSUInteger perPage[SETTINGS_PAGES] = {0};
+        for (TOTKSettingRow *r in settingsPanel.allRows) perPage[r.page]++;
+        rows_fit();
+        assert(perPage[SETTINGS_PAGE_USERS] == 2);
+    }
+    NSButton *addUser = settingsPanel.userButtons[0];
+    assert([addUser.title isEqualToString:@"Add User…"] && !addUser.hidden);
+    pick(@"User (from the next launch)", @"Zelda");
+    /* The row is made again with Zelda marked; wait for the dispatched remake. */
+    wait_for(^BOOL{ return ![menu(@"User (from the next launch)").titleOfSelectedItem isEqualToString:@"Local"]; });
+    addUser = settingsPanel.userButtons[0];
+    assert(fakeUsersActive == 1 && settingsPanel.rows.count == 2 &&
+           [menu(@"User (from the next launch)").titleOfSelectedItem isEqualToString:@"Zelda"]);
+    assert([menu(@"User this run").titleOfSelectedItem isEqualToString:@"Local"]);   /* this run keeps its user */
+    [addUser performClick:nil];
+    wait_for(^BOOL{ return !settingsOpen; });   /* the text bar opens; the panel closed */
+    assert(!settingsOpen && settingsPanel.hidden);
+    runtime_front_text_test("type", "Link"); tick();
+    runtime_front_text_test("enter", "");
+    wait_for(^BOOL{ return settingsOpen != 0; });   /* the panel comes back, the user kept */
+    assert(settingsOpen && fakeUsersCount == 3 && !strcmp(fakeUsers[2].name, "Link"));
+    assert(menu(@"User (from the next launch)").numberOfItems == 3 &&
+           [menu(@"User (from the next launch)").titleOfSelectedItem isEqualToString:@"Zelda"]);
+    addUser = settingsPanel.userButtons[0];
+    [addUser performClick:nil];
+    wait_for(^BOOL{ return !settingsOpen; });
+    runtime_front_text_test("esc", "");   /* Escape answers the bar: nothing is added */
+    wait_for(^BOOL{ return settingsOpen != 0; });
+    assert(settingsOpen && fakeUsersCount == 3);
+    addUser = settingsPanel.userButtons[0];
+    while (fakeUsersCount < RUNTIME_USERS_MAX) assert(runtime_users_add("Filler") >= 0);
+    [addUser performClick:nil];
+    wait_for(^BOOL{ return !settingsOpen; });   /* the console is full: the bar still asks, the user is not kept */
+    runtime_front_text_test("type", "Extra"); tick();
+    runtime_front_text_test("enter", "");
+    wait_for(^BOOL{ return settingsOpen != 0; });
+    assert(settingsOpen && fakeUsersCount == RUNTIME_USERS_MAX);
+    assert([settingsPanel.versionLabel.stringValue containsString:@"At most 8 users"]);
+    while (fakeUsersCount > 2) fakeUsersCount--;   /* the two the next checks name */
+    pick(@"User (from the next launch)", @"Local");
+    wait_for(^BOOL{ return [menu(@"User (from the next launch)").titleOfSelectedItem isEqualToString:@"Local"]; });
+    assert(fakeUsersActive == 0 && [menu(@"User (from the next launch)").titleOfSelectedItem isEqualToString:@"Local"]);
+
+    /* Key bindings and the later pages follow the user page in the tabs, so the checks below start on the input page again. */
+    [settingsPanel selectPage:SETTINGS_PAGE_INPUT]; tick();
+
+    /* A short window (32:9 on a laptop screen): the rows close up, so the title, the close button and the first row stay in it. */
+    NSSize was = window.contentView.bounds.size; press(18); [window setContentSize:NSMakeSize(1728, 486)]; press(18); assert(settingsOpen);
+    assert(NSContainsRect(window.contentView.bounds, settingsPanel.frame));
+    rows_fit();
+    press(18); [window setContentSize:was]; press(18); assert(settingsOpen);
+#ifdef TOTK_GAME_V143
+    /* More effects than fit: both pointer scrolling and controller navigation can reach the top and bottom. */
+    press(18);[window setContentSize:NSMakeSize(1728,360)];press(18);[settingsPanel selectPage:SETTINGS_PAGE_EFFECTS];
+    assert(NSContainsRect(window.contentView.bounds,settingsPanel.frame));
+    rows_fit();
+    NSScrollView *effects=(NSScrollView *)settingsPanel.pages[SETTINGS_PAGE_EFFECTS];
+    assert([effects isKindOfClass:NSScrollView.class]&&effects.documentView.bounds.size.height>effects.contentSize.height);
+    settingsPanel.controllerIndex=0;
+    for(NSUInteger i=1;i<settingsPanel.rows.count;i++)[settingsPanel controllerMove:1];
+    NSView *last=settingsPanel.rows.lastObject.control.superview;
+    assert(NSContainsRect(effects.documentVisibleRect,last.frame));
+    for(NSUInteger i=1;i<settingsPanel.rows.count;i++)[settingsPanel controllerMove:-1];
+    NSView *first=settingsPanel.rows.firstObject.control.superview;
+    assert(NSContainsRect(effects.documentVisibleRect,first.frame));
+    settingsPanel.controllerIndex=(NSInteger)[settingsPanel.rows indexOfObject:row(@"Anti-aliasing method")];
+    [settingsPanel controllerHighlight];
+    uint64_t heldButtons=settingsPanel.previousButtons;BOOL armed=settingsPanel.controllerArmed;
+    pick(@"Anti-aliasing method",@"Off");tick();
+    assert(settingsPanel.controllerTargets[(NSUInteger)settingsPanel.controllerIndex]==row(@"Anti-aliasing method").control.superview);
+    assert(settingsPanel.previousButtons==heldButtons&&settingsPanel.controllerArmed==armed);
+    effects=(NSScrollView *)settingsPanel.pages[SETTINGS_PAGE_EFFECTS];
+    assert(NSContainsRect(effects.documentVisibleRect,row(@"Anti-aliasing method").control.superview.frame));
+    pick(@"Anti-aliasing method",@"SMAA");tick();
+    assert(NSContainsRect(window.contentView.bounds,settingsPanel.frame));
+    press(18);[window setContentSize:was];press(18);
+#endif
+
+    /* While it is open the game gets no keys (only key 1 and Esc act); after it closes, keys reach the game again, through
+       the player's layout (E confirms: A). */
+    key_event(14, YES); assert(!held[14] && !heldOut.buttons); key_event(14, NO);
+    key_event(18, YES); key_event(18, NO); assert(!settingsOpen);
+    key_event(14, YES); assert(held[14] && heldOut.buttons == 1); key_event(14, NO); assert(!held[14] && !heldOut.buttons);
+    /* Keys 2-7 are no shortcuts any more. */
+    int interp = mfx_requested(); float shape = runtime_aspect_ratio();
+    for (unsigned k = 19; k <= 26; k++) if (k != 24 && k != 25) press(k);
+    assert(mfx_requested() == interp && runtime_aspect_ratio() == shape && !settingsOpen && !taa_enabled() && !fakeMouse);
+
+    /* Pages: Display, Input, User and Key bindings; the page shown last opens again. */
+    press(18); assert(settingsOpen);
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY];
+    assert(settingsPanel.rows.count == 7 && [settingsPanel.rows[0].title isEqualToString:@"Overlay"]);   /* edge smoothing, AO and anisotropy are on the effects page; the GPU keep-alive switch is on this one */
+    /* Every page's bottom right: 访问主页 (user 2026-11-11, was the display page's star), after the rows for a controller;
+       the version stays clear of it; a result shows for a moment where the version is. */
+    NSButton *starButton = settingsPanel.homeButton;
+    assert(settingsPanel.displayButtons.count == 0 && [starButton.title isEqualToString:@"Visit homepage"]);
+    assert(!starButton.hidden && NSMaxX(starButton.frame) <= settingsPanel.frame.size.width - 14);
+    assert(NSMaxX(settingsPanel.versionLabel.frame) <= NSMinX(starButton.frame) && starButton.frame.origin.y < 34);
+    assert(settingsPanel.controllerTargets.count == settingsPanel.rows.count + 1 && settingsPanel.controllerTargets.lastObject == starButton);
+    assert(settingsPanel.effectsButtons[0].hidden);   /* "Reset to defaults" only on the effects page */
+    NSString *versionText = settingsPanel.versionLabel.stringValue;
+    [settingsPanel note:@"Thank you!"]; assert([settingsPanel.versionLabel.stringValue isEqualToString:@"Thank you!"]);
+    settingsPanel.versionLabel.stringValue = versionText; settingsPanel.versionLabel.frame = NSMakeRect(18, 9, 230, 16);
+    [settingsPanel selectPage:SETTINGS_PAGE_INPUT];
+    assert(!starButton.hidden && settingsPanel.controllerTargets.lastObject == starButton);   /* every page */
+    assert(settingsPanel.rows.count == 12 + TOTK_V143 && !settingsPanel.pages[SETTINGS_PAGE_INPUT].hidden && settingsPanel.pages[SETTINGS_PAGE_DISPLAY].hidden);   /* the screenshot folder is on the 截图分享 page */
+    assert(settingsPanel.tabs.selectedSegment == SETTINGS_PAGE_INPUT);
+    press(18); press(18); assert(settingsOpen && settingsPanel.page == SETTINGS_PAGE_INPUT);
+
+    /* Mouse sensitivity: a slider from 1 to 100, at once; greyed out while TOTK_MOUSE_SENSITIVITY decides. */
+    NSSlider *slider = (NSSlider *)row(@"Mouse sensitivity").control;
+    assert([slider isKindOfClass:NSSlider.class] && slider.minValue == 1 && slider.maxValue == 100 && slider.intValue == 50);
+    slider.intValue = 80; [row(@"Mouse sensitivity") changed:slider];
+    assert(fakeSensitivity == 80 && [row(@"Mouse sensitivity").valueLabel.stringValue isEqualToString:@"80"]);
+    fakeSensitivity = 30; [settingsPanel.timer fire]; assert(slider.intValue == 30);
+    press(18); fakeSensitivityLocked = 1; press(18);
+    assert(!menu(@"Mouse sensitivity").enabled && [menu(@"Mouse sensitivity").titleOfSelectedItem isEqualToString:@"30"]);
+    press(18); fakeSensitivityLocked = 0; fakeSensitivity = 50; press(18); assert(settingsOpen);
+
+    /* The bottom line: the version in the bottom-left corner (not in the overlay box), no key hints, no buttons on the
+       settings pages, a small margin under the last row. */
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY];
+    assert([settingsPanel.versionLabel.stringValue isEqualToString:@"Ver. " TOTK_GAME_VERSION]);
+    press(18); setenv("TOTK_SOURCE_COMMIT", "abc1234", 1); press(18); assert(settingsOpen);
+    assert([settingsPanel.versionLabel.stringValue isEqualToString:@"Ver. " TOTK_GAME_VERSION " · build abc1234"]);
+    /* The overlay keeps its build line too (user 2026-10-25; after PR #1210). */
+    if (hudBox) { [(TOTKHudBox *)hudBox refresh]; assert([((TOTKHudBox *)hudBox).label.stringValue containsString:@"abc1234"]); }
+    /* The Launcher that built the app comes first (user 2026-11-18: "版本号 旁边 显示 launcher的版本号（launcher版本号放第一）"). */
+    assert([hud_build_text(NULL, "abc1234") isEqualToString:@"build abc1234"] && [hud_build_text("", "abc1234") isEqualToString:@"build abc1234"]);
+    assert([hud_build_text("1.0.6", "abc1234") isEqualToString:@"Launcher 1.0.6 · build abc1234"]);
+    assert([hud_build_text("dev", "abc1234") isEqualToString:@"dev · build abc1234"]);
+    assert(!hud_build_text("1.0.6", NULL) && !hud_build_text("1.0.6", ""));
+    setenv("TOTK_LAUNCHER_VERSION", "1.0.6", 1);
+    if (hudBox) { [(TOTKHudBox *)hudBox refresh]; assert([((TOTKHudBox *)hudBox).label.stringValue containsString:@"Launcher 1.0.6 · build abc1234"]); }
+    unsetenv("TOTK_LAUNCHER_VERSION");
+    footer_spacing_probe();   /* the longest page keeps the original tight footer spacing */
+    [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS]; tick();
+    NSRect lastBand = [settingsPanel.rows.lastObject.control.superview convertRect:settingsPanel.rows.lastObject.control.superview.bounds toView:settingsPanel];
+    NSRect version = settingsPanel.versionLabel.frame;
+    assert(NSMinX(version) <= 20 && NSMinY(version) >= 6 && NSMaxY(version) <= NSMinY(lastBand) - 6);
+    for (NSView *view in settingsPanel.subviews)
+        if ([view isKindOfClass:NSButton.class] && NSMaxY(view.frame) <= NSMinY(lastBand))   /* below the rows only the effects page's reset and 访问主页 */
+            assert(view.hidden || [settingsPanel.effectsButtons containsObject:(NSButton *)view] || view == settingsPanel.homeButton);
+    assert(NSMaxX(settingsPanel.versionLabel.frame) <= NSMinX(settingsPanel.effectsButtons[0].frame) && NSMaxX(settingsPanel.effectsButtons[0].frame) <= NSMinX(settingsPanel.homeButton.frame));   /* the reset, then 访问主页 at the far right */
+    for (NSView *view in settingsPanel.subviews)
+        if ([view isKindOfClass:NSTextField.class] && view != settingsPanel.versionLabel) assert(NSMinY(view.frame) > NSMinY(lastBand));
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
+
+    /* Key bindings: the default layout; a key, a modifier, a mouse button and a controller button bound (an input in use
+       swaps places), key 1 cancels, Command keys pass, a right-click clears, the two resets. */
+    g_settings_bindings_list = YES; [settingsPanel selectPage:SETTINGS_PAGE_BINDINGS]; tick();
+    assert(!settingsPanel.drawings && settingsPanel.frame.size.width == SETTINGS_W);
+    assert(settingsPanel.rows.count == 0 && settingsPanel.controllerTargets.count == 22 && !settingsPanel.resetButtons[0].hidden && !settingsPanel.resetButtons[1].hidden &&
+           [settingsPanel.listToggle.title isEqualToString:@"Show drawings"] && settingsPanel.listToggle.enabled);
+    fakePadDetected = -1; fakePadType = GAMEPAD_TYPE_AUTO; [settingsPanel refreshBindings];
+    assert(titled(box(KEYMAP_X, 0), @"Space") && titled(box(KEYMAP_X, 1), @"—") && titled(box(KEYMAP_X, 2), @"Y"));   /* Xbox names: Switch X sits where Xbox Y is */
+    assert(titled(box(KEYMAP_Y, 0), @"Left click") && titled(box(KEYMAP_ZL, 1), @"Wheel click") && titled(box(KEYMAP_A, 0), @"E") && titled(box(KEYMAP_A, 1), @"Return"));
+    assert(titled(box(KEYMAP_MOVE_UP, 0), @"W") && titled(box(KEYMAP_MOVE_UP, 2), @"Left stick ↑") && !box(KEYMAP_MOVE_UP, 2).enabled);
+    fakePadType = GAMEPAD_TYPE_PLAYSTATION; [settingsPanel refreshBindings];
+    assert(titled(box(KEYMAP_A, 2), @"○") && [settingsPanel.padHeader.stringValue isEqualToString:@"Controller (PlayStation)"]);
+    fakePadType = GAMEPAD_TYPE_AUTO;
+    /* The settings panel's own row (user 2026-10-29): key 1 fixed; on a controller L3 + R3, or the button picked (the
+       touchpad here), cleared back to L3 + R3 by a right-click and by the controller reset; a button a game action takes
+       back leaves the panel on L3 + R3. */
+    [settingsPanel refreshBindings];
+    assert(titled(box(SETTINGS_BIND_PANEL, 0), @"1") && !box(SETTINGS_BIND_PANEL, 0).enabled && !box(SETTINGS_BIND_PANEL, 1).enabled);
+    assert(titled(box(SETTINGS_BIND_PANEL, 2), @"LS + RS") && box(SETTINGS_BIND_PANEL, 2).enabled);
+    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; assert(!fakeSettingsShortcut); [settingsPanel bindPad:16];
+    assert(fakeSettingsShortcut && fakeSettingsButton == 16 && !settingsPanel.capturing && titled(box(SETTINGS_BIND_PANEL, 2), @"Touchpad"));
+    [settingsPanel clearBinding:box(SETTINGS_BIND_PANEL, 2)]; assert(fakeSettingsButton == -1 && titled(box(SETTINGS_BIND_PANEL, 2), @"LS + RS"));
+    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; [settingsPanel bindPad:10]; assert(fakeSettingsButton == 10);
+    [settingsPanel beginCapture:box(KEYMAP_PLUS, 2)]; [settingsPanel bindPad:10]; assert(fakeSettingsButton == -1);
+    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; [settingsPanel bindPad:16]; [settingsPanel resetController:nil]; assert(fakeSettingsButton == -1);
+    /* The screenshot row (user 2026-11-11), the last: P and a free second box on the keyboard, the touchpad held 3 s on a
+       controller; each box changes, saves and clears like the others; a controller button taken for it keeps its game
+       action (the hold is added); the resets bring back P and the touchpad. */
+    {
+        int count; const SettingsAction *all = settings_actions(&count);
+        assert(all[count - 1].action == KEYMAP_SCREENSHOT && !strcmp(all[count - 1].en, "Screenshot") && !strcmp(all[count - 1].zh, "截图"));
+        assert(settingsPanel.controllerTargets[17] == box(KEYMAP_SCREENSHOT, 0).superview);   /* the last row a controller reaches */
+    }
+    assert(titled(box(KEYMAP_SCREENSHOT, 0), @"P") && titled(box(KEYMAP_SCREENSHOT, 1), @"—") && titled(box(KEYMAP_SCREENSHOT, 2), @"Touchpad held 3 s"));
+    assert(box(KEYMAP_SCREENSHOT, 0).enabled && box(KEYMAP_SCREENSHOT, 1).enabled && box(KEYMAP_SCREENSHOT, 2).enabled);
+    {
+        KeyMap shotKeys; runtime_keymap_get(&shotKeys); char text[8192]; assert(keymap_format(&shotKeys, text, sizeof text) > 0 && strstr(text, "\nscreenshot = p\n"));
+        [settingsPanel beginCapture:box(KEYMAP_SCREENSHOT, 1)]; assert([settingsPanel captured:key_down(105, 0)] == nil);   /* F13: not a layout key, waits */
+        assert(settingsPanel.capturing && [settingsPanel captured:key_down(31, 0)] == nil && !settingsPanel.capturing);   /* O */
+        runtime_keymap_get(&shotKeys); assert(shotKeys.slot[KEYMAP_SCREENSHOT][0] == 35 && shotKeys.slot[KEYMAP_SCREENSHOT][1] == 31 && !strcmp(savedName, "keyboard.txt"));
+        assert(titled(box(KEYMAP_SCREENSHOT, 1), @"O"));
+        assert(keymap_format(&shotKeys, text, sizeof text) > 0 && strstr(text, "\nscreenshot = p o\n"));
+        KeyMap back; keymap_default(&back); const char *error = NULL; assert(!keymap_parse(text, &back, &error) && !memcmp(&back, &shotKeys, sizeof back));
+        [settingsPanel clearBinding:box(KEYMAP_SCREENSHOT, 1)]; runtime_keymap_get(&shotKeys); assert(shotKeys.slot[KEYMAP_SCREENSHOT][1] == KEYMAP_NONE);
+    }
+    [settingsPanel beginCapture:box(KEYMAP_SCREENSHOT, 2)]; assert(!fakeSettingsShortcut); [settingsPanel bindPad:10];
+    assert(fakeSettingsShortcut && fakeShotButton == 10 && fakeMap[10] == 1u << KEYMAP_PLUS && fakeSettingsButton == -1 && titled(box(KEYMAP_SCREENSHOT, 2), @"Menu held 3 s"));
+    assert(titled(box(KEYMAP_PLUS, 2), @"Menu"));   /* the menu button still opens the game's menu */
+    [settingsPanel clearBinding:box(KEYMAP_SCREENSHOT, 2)]; assert(fakeShotButton == -1 && titled(box(KEYMAP_SCREENSHOT, 2), @"—") && fakeMap[10] == 1u << KEYMAP_PLUS);
+    [settingsPanel resetController:nil]; assert(fakeShotButton == CONTROLLER_SCREENSHOT_DEFAULT && titled(box(KEYMAP_SCREENSHOT, 2), @"Touchpad held 3 s"));
+    /* P takes the screenshot and nothing of it reaches the game; while the panel is open keys other than 1 and Esc do nothing. */
+    press(18); assert(!settingsOpen);
+    capturePresses = 0; key_event(35, YES); assert(capturePresses == 1 && heldOut.buttons == 0 && !heldOut.lx && !heldOut.ly && !heldOut.rx && !heldOut.ry);
+    key_event(35, YES); assert(capturePresses == 1);   /* held: one picture */
+    key_event(35, NO); assert(capturePresses == 1);
+    press(18); assert(settingsOpen); key_event(35, YES); key_event(35, NO); assert(capturePresses == 1);
+    [settingsPanel beginCapture:box(KEYMAP_X, 0)]; assert(settingsPanel.capturing && titled(box(KEYMAP_X, 0), @"Press a key…"));
+    assert([settingsPanel captured:key_down(12, 0)] == nil);   /* Q locked on: it jumps now, lock on takes Space */
+    KeyMap keysNow; runtime_keymap_get(&keysNow);
+    assert(keysNow.slot[KEYMAP_X][0] == 12 && keysNow.slot[KEYMAP_ZL][0] == 49 && !settingsPanel.capturing && !strcmp(savedName, "keyboard.txt"));
+    assert(titled(box(KEYMAP_X, 0), @"Q") && titled(box(KEYMAP_ZL, 0), @"Space"));
+    press(18); assert(!settingsOpen); key_event(12, YES); assert(heldOut.buttons == 1u << KEYMAP_X); key_event(12, NO); press(18); assert(settingsOpen);
+    [settingsPanel beginCapture:box(KEYMAP_B, 1)];
+    NSEvent *command = key_down(12, NSEventModifierFlagCommand); assert([settingsPanel captured:command] == command && settingsPanel.capturing);
+    NSEvent *rightShift = [NSEvent keyEventWithType:NSEventTypeFlagsChanged location:NSZeroPoint modifierFlags:NSEventModifierFlagShift timestamp:0
+                                        windowNumber:window.windowNumber context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:60];
+    assert([settingsPanel captured:rightShift] == nil); runtime_keymap_get(&keysNow); assert(keysNow.slot[KEYMAP_B][1] == 60);
+    [settingsPanel beginCapture:box(KEYMAP_A, 1)]; assert([settingsPanel captured:key_down(18, 0)] == nil && !settingsPanel.capturing);   /* key 1 cancels */
+    runtime_keymap_get(&keysNow); assert(keysNow.slot[KEYMAP_A][1] == 36);
+    [settingsPanel beginCapture:box(KEYMAP_Y, 1)];
+    NSEvent *right = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:window.windowNumber
+                                         context:nil eventNumber:0 clickCount:1 pressure:1];
+    assert([settingsPanel captured:right] == nil); runtime_keymap_get(&keysNow);
+    assert(keysNow.slot[KEYMAP_Y][1] == KEYMAP_MOUSE_FIRST + 1 && keysNow.slot[KEYMAP_ZR][0] == 5);   /* the bow takes G */
+    [settingsPanel clearBinding:box(KEYMAP_Y, 1)]; runtime_keymap_get(&keysNow); assert(keysNow.slot[KEYMAP_Y][1] == KEYMAP_NONE && titled(box(KEYMAP_Y, 1), @"—"));
+    /* A controller button: through the panel's controller input, L1 now jumps and the ability takes the top button. */
+    [settingsPanel beginCapture:box(KEYMAP_X, 2)]; assert(titled(box(KEYMAP_X, 2), @"Press a button…"));
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:100 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 6} time:100.1 active:YES];
+    assert(fakeMap[6] == 1u << KEYMAP_X && fakeMap[3] == 1u << KEYMAP_L && !settingsPanel.capturing && titled(box(KEYMAP_X, 2), @"LB") && titled(box(KEYMAP_L, 2), @"Y"));
+    [settingsPanel clearBinding:box(KEYMAP_X, 2)]; assert(!fakeMap[6] && titled(box(KEYMAP_X, 2), @"—"));
+    [settingsPanel.resetButtons[0] performClick:nil]; runtime_keymap_get(&keysNow);
+    KeyMap defaults; keymap_default(&defaults); assert(!memcmp(&keysNow, &defaults, sizeof defaults) && !strcmp(removedName, "keyboard.txt"));
+    [settingsPanel.resetButtons[1] performClick:nil];
+    uint16_t defaultMap[CONTROLLER_BUTTONS]; uint8_t defaultModes[CONTROLLER_BUTTONS]; controller_map_default(defaultMap, defaultModes);
+    assert(!memcmp(fakeMap, defaultMap, sizeof defaultMap) && titled(box(KEYMAP_X, 2), @"Y"));
+    /* With a controller: nothing is highlighted until it moves (PR #1210); the first A only shows where it is, the
+       next on a row waits for the new button; R1 / L1 change the page. */
+    for (NSView *v in settingsPanel.controllerTargets) assert(v.layer.borderWidth == 0);
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:101 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1} time:101.1 active:YES];
+    assert(!settingsPanel.capturing && settingsPanel.controllerTargets[0].layer.borderWidth == 2);
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:101.2 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1} time:101.3 active:YES];
+    assert(settingsPanel.capturing && settingsPanel.capturing.slot == 2);
+    settings_pointer_used(); assert(settingsPanel.controllerTargets[0].layer.borderWidth == 0);   /* a click: the highlight goes */
+    [settingsPanel endCapture];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:102 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 7} time:102.1 active:YES];
+    assert(settingsPanel.page == SETTINGS_PAGE_CONTRIB);
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:103 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 6} time:103.1 active:YES];
+    assert(settingsPanel.page == SETTINGS_PAGE_BINDINGS);
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY];
+
+    /* Key bindings as drawings (PR #1210): the panel made wider for them; the keyboard and mouse, or the controller,
+       with what each key or button does; a click's menu of actions; the actions nothing drives; a controller moves through
+       the controller's buttons and changes them; a window too small for them gets the list. */
+    press(18); [window setContentSize:NSMakeSize(1280, 720)]; g_settings_bindings_list = NO; g_settings_bindings_device = 0; press(18); assert(settingsOpen);
+    for (NSView *v in settingsPanel.controllerTargets) assert(v.layer.borderWidth == 0);   /* nothing looks picked at the opening */
+    [settingsPanel selectPage:SETTINGS_PAGE_BINDINGS]; tick();
+    assert(settingsPanel.drawings && settingsPanel.page == SETTINGS_PAGE_BINDINGS && settingsPanel.frame.size.width == SETTINGS_WIDE_W);
+    assert(NSContainsRect(window.contentView.bounds, settingsPanel.frame) && settingsPanel.tabs.selectedSegment == SETTINGS_PAGE_BINDINGS);
+    assert(!settingsPanel.keyboardDiagram.hidden && settingsPanel.padDiagram.hidden && !settingsPanel.resetButtons[0].hidden && settingsPanel.resetButtons[1].hidden);
+    assert([settingsPanel.listToggle.title isEqualToString:@"Show as list"] && [settingsPanel.drawingsHelp.stringValue hasPrefix:@"Click a key"]);
+    TOTKKeyboardDiagram *kb = settingsPanel.keyboardDiagram;
+    NSRect eKey = [kb rectOfInput:14], oneKey = [kb rectOfInput:18], wheel = [kb rectOfInput:KEYMAP_MOUSE_FIRST + 2], leftClick = [kb rectOfInput:KEYMAP_MOUSE_FIRST];
+    assert([kb inputAt:NSMakePoint(NSMidX(eKey), NSMidY(eKey)) rect:NULL] == 14);
+    assert([kb inputAt:NSMakePoint(NSMidX(oneKey), NSMidY(oneKey)) rect:NULL] == -1);   /* key 1 opens the panel: not changeable */
+    assert([kb inputAt:NSMakePoint(NSMidX(wheel), NSMidY(wheel)) rect:NULL] == KEYMAP_MOUSE_FIRST + 2);
+    assert([kb inputAt:NSMakePoint(NSMinX(leftClick) + 8, NSMidY(leftClick)) rect:NULL] == KEYMAP_MOUSE_FIRST);
+    /* Only a press on the panel itself drags it: a drag that started on the drawing still reaches the panel, and it used to
+       jump there from the last press's spot. */
+    NSEvent *(^mouse)(NSEventType, NSPoint) = ^NSEvent *(NSEventType type, NSPoint at) {
+        return [NSEvent mouseEventWithType:type location:at modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1]; };
+    NSPoint spot = settingsPanel.frame.origin, savedAt = g_settings_at, background = [settingsPanel convertPoint:NSMakePoint(6, settingsPanel.bounds.size.height - 6) toView:nil];
+    [settingsPanel mouseDown:mouse(NSEventTypeLeftMouseDown, background)];
+    [settingsPanel mouseDragged:mouse(NSEventTypeLeftMouseDragged, NSMakePoint(background.x + 3, background.y + 2))];
+    [settingsPanel mouseUp:mouse(NSEventTypeLeftMouseUp, NSMakePoint(background.x + 3, background.y + 2))];
+    assert(NSEqualPoints(settingsPanel.frame.origin, NSMakePoint(spot.x + 3, spot.y + 2)));
+    spot = settingsPanel.frame.origin;
+    NSPoint onDrawing = [kb convertPoint:NSMakePoint(NSMidX(oneKey), NSMidY(oneKey)) toView:nil];   /* no menu there */
+    [kb mouseDown:mouse(NSEventTypeLeftMouseDown, onDrawing)];
+    [kb mouseDragged:mouse(NSEventTypeLeftMouseDragged, NSMakePoint(onDrawing.x + 3, onDrawing.y + 2))];
+    [kb mouseUp:mouse(NSEventTypeLeftMouseUp, NSMakePoint(onDrawing.x + 3, onDrawing.y + 2))];
+    assert(NSEqualPoints(settingsPanel.frame.origin, spot));
+    g_settings_at = savedAt; [settingsPanel center];
+    NSMenu *actions = [settingsPanel menuForInput:14 pad:NO]; NSMenuItem *ticked = nil, *jump = nil;
+    for (NSMenuItem *i in actions.itemArray) { if (i.state == NSControlStateValueOn) ticked = i; if (i.action && i.tag == KEYMAP_X) jump = i; }
+    assert([actions.itemArray.firstObject.title isEqualToString:@"E"] && ticked && ticked.tag == KEYMAP_A && jump && [actions.itemArray.lastObject.title isEqualToString:@"None (unused)"]);
+    [settingsPanel menuPicked:jump]; runtime_keymap_get(&keysNow);   /* E jumps now (with Space); confirm keeps Return */
+    assert(keysNow.slot[KEYMAP_X][0] == 49 && keysNow.slot[KEYMAP_X][1] == 14 && keysNow.slot[KEYMAP_A][0] == 36 && keysNow.slot[KEYMAP_A][1] == KEYMAP_NONE);
+    [settingsPanel assignInput:36 action:-1]; NSString *missing = diagram_missing(0);
+    if (![missing isEqualToString:@"No key: Confirm / Interact"]) fprintf(stderr, "diagram_missing(0): %s\n", missing.UTF8String);
+    assert([missing isEqualToString:@"No key: Confirm / Interact"]);
+    [settingsPanel.resetButtons[0] performClick:nil]; assert(diagram_missing(0) == nil);
+    settingsPanel.deviceTabs.selectedSegment = 1; [settingsPanel deviceChanged:settingsPanel.deviceTabs];
+    assert(settingsPanel.keyboardDiagram.hidden && !settingsPanel.padDiagram.hidden && settingsPanel.resetButtons[0].hidden && !settingsPanel.resetButtons[1].hidden);
+    TOTKControllerDiagram *pd = settingsPanel.padDiagram; NSRect north = [pd rectOfPhysical:3];
+    assert([pd physicalAt:NSMakePoint(NSMidX(north), NSMidY(north)) rect:NULL] == 3 && [pd order].count == 16 && [pd order][0].intValue == 8);
+    actions = [settingsPanel menuForInput:3 pad:YES]; int choices = 0; ticked = nil;
+    for (NSMenuItem *i in actions.itemArray) if (i.action) { choices++; assert(i.tag < KEYMAP_SWITCH_BUTTONS || i.tag == SETTINGS_BIND_PANEL || i.tag == KEYMAP_SCREENSHOT); if (i.state == NSControlStateValueOn) ticked = i; }
+    assert(choices == 19 && ticked.tag == KEYMAP_X);   /* 16 buttons, the settings panel, the screenshot hold and none: no stick directions */
+    /* The screenshot hold on the top button: its own tick beside Jump, which the button keeps; None takes both away. */
+    for (NSMenuItem *i in actions.itemArray) if (i.tag == KEYMAP_SCREENSHOT) { assert([i.title isEqualToString:@"Screenshot (hold 3 s)"] && i.state == NSControlStateValueOff); [settingsPanel menuPicked:i]; }
+    assert(fakeShotButton == 3 && fakeMap[3] == 1u << KEYMAP_X);
+    actions = [settingsPanel menuForInput:3 pad:YES]; int on = 0;
+    for (NSMenuItem *i in actions.itemArray) if (i.state == NSControlStateValueOn) { on++; assert(i.tag == KEYMAP_X || i.tag == KEYMAP_SCREENSHOT); }
+    assert(on == 2);
+    for (NSMenuItem *i in actions.itemArray) if (i.action && i.tag == -1) [settingsPanel menuPicked:i];
+    assert(fakeShotButton == -1 && fakeMap[3] == 0);
+    [settingsPanel.resetButtons[1] performClick:nil]; assert(fakeShotButton == CONTROLLER_SCREENSHOT_DEFAULT && fakeMap[3] == 1u << KEYMAP_X);
+    actions = [settingsPanel menuForInput:16 pad:YES]; on = 0;   /* the touchpad: drives nothing, takes the screenshot */
+    for (NSMenuItem *i in actions.itemArray) if (i.state == NSControlStateValueOn) { on++; assert(i.tag == KEYMAP_SCREENSHOT); }
+    assert(on == 1);
+    actions = [settingsPanel menuForInput:3 pad:YES];
+    for (NSMenuItem *i in actions.itemArray) if (i.tag == SETTINGS_BIND_PANEL) [settingsPanel menuPicked:i];
+    assert(fakeSettingsButton == 3); [settingsPanel assignPad:3 action:KEYMAP_X]; assert(fakeSettingsButton == -1 && fakeMap[3] == 1u << KEYMAP_X);
+    [settingsPanel assignPad:3 action:KEYMAP_ZR]; assert(fakeMap[3] == 1u << KEYMAP_ZR && fakeMap[9] == 1u << KEYMAP_ZR && [diagram_missing(1) isEqualToString:@"No button: Jump"]);
+    assert(settingsPanel.controllerTargets.count == 20 && pd.selected == -1);
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:200 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 15} time:200.1 active:YES];   /* shows where it is */
+    assert(settingsPanel.controllerIndex == 0 && settingsPanel.deviceTabs.layer.borderWidth == 2 && pd.selected == -1);
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:201 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 15} time:201.1 active:YES];
+    assert(settingsPanel.controllerIndex == 1 && pd.selected == 8 && settingsPanel.deviceTabs.layer.borderWidth == 0);   /* LT */
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:202 active:YES];
+    [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 14} time:202.1 active:YES];
+    assert(fakeMap[8] == 1u << KEYMAP_ZR);   /* right: the next action, after lock on the bow */
+    settings_pointer_used(); assert(pd.selected == -1);
+    [settingsPanel.resetButtons[1] performClick:nil]; assert(!memcmp(fakeMap, defaultMap, sizeof defaultMap) && diagram_missing(1) == nil);
+    [settingsPanel.listToggle performClick:nil]; tick(); assert(g_settings_bindings_list && !settingsPanel.drawings && settingsPanel.page == SETTINGS_PAGE_BINDINGS);
+    [settingsPanel.listToggle performClick:nil]; tick(); assert(!g_settings_bindings_list && settingsPanel.drawings);
+    [settingsPanel selectPage:SETTINGS_PAGE_INPUT]; tick(); assert(!settingsPanel.drawings && settingsPanel.frame.size.width == SETTINGS_W);
+    press(18); [window setContentSize:NSMakeSize(900, 600)]; g_settings_page = SETTINGS_PAGE_BINDINGS; press(18);
+    assert(settingsOpen && !settingsPanel.drawings && settingsPanel.frame.size.width == SETTINGS_W && !settingsPanel.listToggle.enabled);   /* too small: the list */
+    press(18); [window setContentSize:NSMakeSize(700, 600)]; press(18);   /* narrower than the panel: it narrows to stay inside */
+    assert(settingsOpen && settingsPanel.frame.size.width == 692 && NSContainsRect(window.contentView.bounds, settingsPanel.frame));
+    press(18); [window setContentSize:NSMakeSize(500, 400)]; press(18);   /* never below the old 600 pt */
+    assert(settingsOpen && settingsPanel.frame.size.width == SETTINGS_NARROW_W);
+    press(18); [window setContentSize:NSMakeSize(1280, 720)]; g_settings_page = SETTINGS_PAGE_DISPLAY; press(18); assert(settingsOpen);
+
+    press(18); assert(!settingsOpen);
+
+    /* Chinese. */
+    setenv("TOTK_UI_LANG", "zh", 1); press(18); assert(settingsOpen);
+    shows(@"分辨率", @"1080p"); shows(@"手柄类型", @"自动（未接手柄）");
+#ifdef TOTK_GAME_V143
+    shows(@"抗锯齿方式",@"SMAA");shows(@"抗锯齿质量",@"High");
+    pick(@"抗锯齿方式",@"FXAA");tick();shows(@"抗锯齿质量",@"原版");
+#endif
+    assert([row(@"本次运行的用户").control isKindOfClass:[NSPopUpButton class]]);
+    shows(@"用户（下次启动生效）", @"Local");
+    assert([settingsPanel.userButtons[0].title isEqualToString:@"添加用户…"]);
+#ifdef GAME_BOTW160
+    shows(@"DualSense 拉弓扳机", @"这个版本没有"); assert(!menu(@"DualSense 拉弓扳机").enabled);
+#else
+    assert(switched(@"DualSense 拉弓扳机"));
+#endif
+    fakePadDetected = GAMEPAD_TYPE_SWITCH; shows(@"手柄类型", @"自动（Switch）");
+    pick(@"补帧", @"50+50"); assert(mfx_requested() == MFX_50);
+    shows(@"震动强度", @"1×（默认）"); assert(switched(@"震动") && switched(@"体感瞄准"));
+
+    if (argc == 2) {
+        NSBitmapImageRep *rep = [settingsPanel bitmapImageRepForCachingDisplayInRect:settingsPanel.bounds];
+        [settingsPanel cacheDisplayInRect:settingsPanel.bounds toBitmapImageRep:rep];
+        assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(argv[1]) atomically:YES]);
+    }
+    [settingsPanel.timer invalidate];
+    puts("pass: settings panel (key 1 / Esc, overlay, frame lock, interpolation, resolution 1080p / MetalFX / 2K / 4K and window size, aspect 16:9 / 16:10 / 21:9 / 32:9, aspect ratio, switches, controller type, rumble / rumble strength / gyro aiming, users: this run, next launch, added through the text bar, full console, game keys blocked while open, keys 2-7 inert, Chinese)");
+    return 0;
+}}
