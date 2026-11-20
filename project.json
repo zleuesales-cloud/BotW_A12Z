@@ -1,0 +1,34 @@
+{
+  "status": "traditional Metal source imported for compile audit; not A12Z validated",
+  "target": {
+    "model": "iPad8,9",
+    "game": "BOTW 1.9.0 + DLC",
+    "render": [
+      1280,
+      720
+    ],
+    "output": [
+      1920,
+      1080
+    ],
+    "fps": 30,
+    "interpolation": false,
+    "soak_minutes": 120
+  },
+  "candidates": {
+    "traditional_metal": "1918662410-ship-it/MacNativeGames@f71ea7b56eb1f7064d5e753428cc6b05a124241b",
+    "d2r_a12z": "bluewater0121/d2r-mobile-a12z@30ca74ea4e525774cc38958428bc67bfb828ecd7",
+    "d2r": "d2r-mobile/d2r-mobile@209dcd667fe937d23a153c88fd8fff97bdadc242",
+    "spirv_cross": "KhronosGroup/SPIRV-Cross@57e4efcc84112abcd426dc5ec248b5339bee04f2"
+  },
+  "existing_resources": "/Users/z-tek/Documents/NS/BotW_build",
+  "historical_source_missing": "/Users/z-tek/Documents/NS/BotW_A12Z_Native",
+  "device": "00008027-001C51D12262402E",
+  "note": "Candidate commits are audit inputs, not selected or validated dependency pins.",
+  "upstream_archive_sha256": "1499f923d9d7c904757ec0a65acb3718282e1c0f9889a0de8a4f4bb66a211e33",
+  "audit_findings": [
+    "Historical Apple5 log skips NVN opcodes 2,29,30,31; cannot be used as complete renderer.",
+    "Traditional Metal candidate maps MTL4 objects through m3_compat; Tier 1 resource binding requires separate audit.",
+    "Historical App has launched successfully; no gameplay or picture correctness established."
+  ]
+}
