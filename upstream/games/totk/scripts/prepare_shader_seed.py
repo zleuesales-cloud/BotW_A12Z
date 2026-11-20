@@ -264,6 +264,17 @@ def translations_folder(beside, identity):
     return folder, True
 
 
+def translation_identity(binding_abi, translator_code_sha256, spirv_cross_sha256):
+    """Inputs that can change a translated shader, including its versioned resource binding model."""
+    identity = dict(schema=TRANSLATIONS_SCHEMA, chain=CHAIN,
+                    translator_code_sha256=translator_code_sha256, spirv_cross_sha256=spirv_cross_sha256,
+                    request_sha256=digest((inspect.getsource(translation_request) +
+                                           inspect.getsource(early_fragment_tests)).encode()))
+    if binding_abi != 'ab':
+        identity['binding_abi'] = binding_abi
+    return identity
+
+
 def cached_inventory(romfs, modules, game, folder, identity):
     """inventory(), kept in <folder>: inventory.json names the identity it was read with (the RomFS, the game modules,
     INVENTORY_SHA256), each shader's stage, source and the offsets of its control and code in shaders.bin, and the SHA-256
@@ -772,17 +783,54 @@ def plan(shaders, startup, listed, all_default=False):
     return jobs
 
 
-def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, modules=None, game='totk'):
+def binding_output_directory(root, binding_abi):
+    """The service's per-ABI output namespace, with the same idempotent suffix convention."""
+    suffix = '.discrete-v1'
+    if binding_abi == 'ab':
+        if root.name.endswith(suffix):
+            raise ValueError(f'AB output root is reserved for the discrete-v1 namespace: {root}')
+        return root
+    if binding_abi != 'discrete-v1':
+        raise ValueError(f'unsupported binding ABI: {binding_abi}')
+    return root if root.name.endswith(suffix) else root.with_name(root.name+suffix)
+
+
+def service_arguments(translator, spirv_cross, output, chain, binding_abi):
+    """Keep the legacy service CLI for AB callers; discrete services opt into their explicit ABI."""
+    args = [str(translator), '--service', '--spirv-cross', str(spirv_cross), '--out', str(output), '--chain', chain]
+    if binding_abi != 'ab':
+        args.extend(['--binding-abi', binding_abi])
+    return args
+
+
+def seed_identity(binding_abi, version, game, source_romfs_sha256, translator_code_sha256,
+                  spirv_cross_sha256, preparation_sha256, shader_list_sha256):
+    """The verified seed manifest identity; only non-default binding models add a new identity field."""
+    identity = dict(schema=1, chain=CHAIN, version=version, game=game,
+                    source_romfs_sha256=source_romfs_sha256, translator_code_sha256=translator_code_sha256,
+                    spirv_cross_sha256=spirv_cross_sha256, preparation_sha256=preparation_sha256,
+                    shader_list_sha256=shader_list_sha256)
+    if binding_abi != 'ab':
+        identity['binding_abi'] = binding_abi
+    return identity
+
+
+def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, modules=None, game='totk', binding_abi='ab'):
     shader_list = shader_list or GAMES[game]['list']
+    if binding_abi not in ('ab', 'discrete-v1'):
+        raise ValueError(f'unsupported binding ABI: {binding_abi}')
+    requested_output = output
+    if binding_abi == 'discrete-v1' and requested_output.name.endswith('.discrete-v1'):
+        requested_output = requested_output.with_name(requested_output.name[:-len('.discrete-v1')])
+    output = binding_output_directory(requested_output, binding_abi)
     min_shaders = GAMES[game]['min_shaders']
     shared = ShaderList.load(shader_list)
     listed = shared.variants
-    identity = dict(schema=1, chain=CHAIN, version=version, game=game,
-                    source_romfs_sha256=json.loads((romfs/'index.json').read_text())['romfs_sha256'],
-                    translator_code_sha256=code_digest(translator),   # its code, any signature (2026-11-18)
-                    spirv_cross_sha256=digest(spirv_cross.read_bytes()),
-                    preparation_sha256=digest(Path(__file__).read_bytes()),
-                    shader_list_sha256=digest(Path(shader_list).read_bytes()) if Path(shader_list).is_file() else None)
+    identity = seed_identity(binding_abi, version, game,
+                             json.loads((romfs/'index.json').read_text())['romfs_sha256'],
+                             code_digest(translator), digest(spirv_cross.read_bytes()),
+                             digest(Path(__file__).read_bytes()),
+                             digest(Path(shader_list).read_bytes()) if Path(shader_list).is_file() else None)
     translator_file = digest(translator.read_bytes())   # what seeds and caches named before; the manifest keeps it too
     old = reusable_seed(output, identity, min_shaders, translator_file=translator_file)
     if old is not None:
@@ -791,7 +839,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
     # The previous seed becomes the staging folder: most of its files are this run's too (links into the translation
     # cache), so they stay where they are instead of 65,000 deletions and links (53 s on the external volume, 2026-10-21).
     # Without its manifest it is not a seed until this run writes one; what this run does not want is removed at the end.
-    staging = output.with_name(output.name+'.partial')
+    staging = binding_output_directory(requested_output.with_name(requested_output.name+'.partial'), binding_abi)
     if output.is_dir():
         if staging.exists():
             shutil.rmtree(staging)
@@ -804,10 +852,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                    modules={p.name: digest(p.read_bytes()) for p in sorted(Path(modules).glob('*.patched.bin'))} if modules else {},
                    inventory_sha256=INVENTORY_SHA256)
     _, shaders, startup, archives = cached_inventory(romfs, modules, game, output.with_name(output.name+'.inventory'), scanned)
-    translations = dict(schema=TRANSLATIONS_SCHEMA, chain=CHAIN, translator_code_sha256=identity['translator_code_sha256'],
-                        spirv_cross_sha256=identity['spirv_cross_sha256'],
-                        request_sha256=digest((inspect.getsource(translation_request) +
-                                               inspect.getsource(early_fragment_tests)).encode()))
+    translations = translation_identity(binding_abi, identity['translator_code_sha256'], identity['spirv_cross_sha256'])
     legacy = {k: v for k, v in translations.items() if k != 'translator_code_sha256'}
     legacy['translator_sha256'] = translator_file   # a cache named by this very file before 2026-11-18 is this translator's
     folder, common = translations_folder(output.with_name(output.name+'.translations'), translations)
@@ -863,8 +908,7 @@ def prepare(romfs, output, translator, spirv_cross, version, shader_list=None, m
                     reused = reply is not None
                     if not reused:
                         if process is None:
-                            process = subprocess.Popen([str(translator), '--service', '--spirv-cross', str(spirv_cross),
-                                                        '--out', str(staging), '--chain', CHAIN],
+                            process = subprocess.Popen(service_arguments(translator, spirv_cross, staging, CHAIN, binding_abi),
                                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
                         # The translator writes the MSL over the file in place (Service.cs File.WriteAllBytes), and a staging
                         # file may be a hard link to the translation cache (take / put link them): a translation made again
@@ -990,9 +1034,11 @@ def main():
     p.add_argument('--shader-list', type=Path, help='the shared shader list (default: the game\'s, assets/shader_list.tsv)')
     p.add_argument('--modules', type=Path, help='rewritten/<version>: the game module images the list locates shaders in')
     p.add_argument('--game', choices=sorted(GAMES), default='totk', help='totk (default) or botw: the game the RomFS belongs to')
+    p.add_argument('--binding-abi', choices=('ab', 'discrete-v1'), default='ab',
+                   help='the MSL resource binding model (default: ab)')
     a = p.parse_args()
     prepare(a.romfs.resolve(), a.output.resolve(), a.translator.resolve(), a.spirv_cross.resolve(), a.version,
-            a.shader_list.resolve() if a.shader_list else None, a.modules.resolve() if a.modules else None, a.game)
+            a.shader_list.resolve() if a.shader_list else None, a.modules.resolve() if a.modules else None, a.game, a.binding_abi)
 
 
 if __name__ == '__main__':

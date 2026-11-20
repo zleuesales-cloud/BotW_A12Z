@@ -56,7 +56,7 @@ static partial class ShaderService
     };
     static readonly Regex Fp64 = new(@"\bdouble\b|unsupported_GLSLstd450(?:Pack|Unpack)Double2x32");
 
-    static string spirvCross, outDir, chain;
+    static string spirvCross, outDir, chain, bindingAbi = "ab";
     static int debugMode;
 
     // ---- small helpers with Python's meaning ----
@@ -89,6 +89,16 @@ static partial class ShaderService
     static JsonNode GetOr(JsonObject o, string key, JsonNode fallback) => o.TryGetPropertyValue(key, out JsonNode v) ? v?.DeepClone() : fallback;
     static JsonNode Num(long? v) => v is long l ? JsonValue.Create(l) : null;
     static long Long(JsonNode n) => n.AsValue().TryGetValue(out long l) ? l : (long)n.GetValue<double>();
+    static string BindingOutputDirectory(string root, string abi)
+    {
+        const string suffix = ".discrete-v1";
+        if (abi == "ab")
+        {
+            if (root.EndsWith(suffix, StringComparison.Ordinal)) throw new RuntimeError($"AB output root is reserved for the discrete-v1 namespace: {root}");
+            return root;
+        }
+        return root.EndsWith(suffix, StringComparison.Ordinal) ? root : root + suffix;
+    }
 
     // ---- binding names -> NVN slots (shader_service.py decode_tex / tex_slot_of_name) ----
     static long? Slot(long word, long @base, long cb) => cb == 2 && word * 4 >= @base && (word * 4 - @base) % 8 == 0 ? (word * 4 - @base) / 8 : null;
@@ -118,7 +128,7 @@ static partial class ShaderService
         return m.Success ? FloorDiv(ParseHex(m.Groups[1].Value) - 8, 2) : -1;
     }
 
-    static readonly Regex TexDecl = new(@"\b(?:texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]");
+    static readonly Regex TexDecl = new(@"\b(?:texture\w+|depth\w+)<[^>]+>\s+(\w+)\s*\[\[(?:id|texture)\(\d+\)\]\]");
 
     /// NVN texture slots of the textures the MSL samples with a depth compare (sample_compare / gather_compare): shadow
     /// maps. The game binds depth textures to all of a shader's compare slots or to none of them (1,248 and 126 of the
@@ -133,7 +143,8 @@ static partial class ShaderService
             long slot = TexSlotOfName(name);
             if (slot < 0) continue;
             var use = new Regex(@"\b" + Regex.Escape(name) + @"\b");
-            if (lines.Any(line => use.IsMatch(line) && !line.Contains("[[id(", StringComparison.Ordinal) && line.Contains("_compare(", StringComparison.Ordinal)))
+            if (lines.Any(line => use.IsMatch(line) && !line.Contains("[[id(", StringComparison.Ordinal) &&
+                                  !line.Contains("[[texture(", StringComparison.Ordinal) && line.Contains("_compare(", StringComparison.Ordinal)))
                 slots.Add(slot);
         }
         return slots;
@@ -193,7 +204,7 @@ static partial class ShaderService
     static string RewriteDepthTextures(string src, HashSet<long> depthSlots)
     {
         var names = new List<(string ty, string name)>();
-        foreach (Match m in Regex.Matches(src, @"\b(texture\w+)<float>\s+(\w+)\s*\[\[id\((\d+)\)\]\]"))
+        foreach (Match m in Regex.Matches(src, @"\b(texture\w+)<float>\s+(\w+)\s*\[\[(?:id|texture)\((\d+)\)\]\]"))
         {
             string ty = m.Groups[1].Value, name = m.Groups[2].Value;
             if (!depthSlots.Contains(TexSlotOfName(name))) continue;
@@ -250,8 +261,8 @@ static partial class ShaderService
     //  - Non-compare reads of a depth texture (totk_depth_fetch above): the game binds a trilinear sampler, and on the Switch
     //    the read lands on one texel; Metal blends neighbouring depths, which puts reconstructed positions in mid-air at
     //    object edges. These reads are point-sampled.
-    static readonly Regex D16Compare = new(@"(\.sample_compare\(spvDescriptorSet0\.[A-Za-z0-9_]+Smplr, [^,]+\.xy, uint\(rint\([^)]+\)\), )([^,]+)(, level)");
-    static readonly Regex DepthFetchSample = new(@"totk_depth_fetch\((spvDescriptorSet0\.[A-Za-z0-9_]+)\.sample\(spvDescriptorSet0\.[A-Za-z0-9_]+Smplr, ");
+    static readonly Regex D16Compare = new(@"(\.sample_compare\((?:spvDescriptorSet0\.)?[A-Za-z0-9_]+Smplr, [^,]+\.xy, uint\(rint\([^)]+\)\), )([^,]+)(, level)");
+    static readonly Regex DepthFetchSample = new(@"totk_depth_fetch\(((?:spvDescriptorSet0\.)?[A-Za-z0-9_]+)\.sample\((?:spvDescriptorSet0\.)?[A-Za-z0-9_]+Smplr, ");
 
     static string MatchSwitchDepthSampling(string src)
     {
@@ -282,45 +293,38 @@ static partial class ShaderService
     static bool MslStoresThrough(string msl, string name)
     {
         if (msl.Contains($"&(*spvDescriptorSet0.{name})", StringComparison.Ordinal)) return true;
-        return Regex.IsMatch(msl, @"\(\*spvDescriptorSet0\." + Regex.Escape(name) + @"\)\._m0\[(?:[^\[\]]|\[[^\[\]]*\])*\](?:\.[xyzw]+)?\s*=(?!=)");
+        string member = @"(?:\(\*(?:spvDescriptorSet0\.)?" + Regex.Escape(name) + @"\)|(?:spvDescriptorSet0\.)?" + Regex.Escape(name) + @")\._m0\[(?:[^\[\]]|\[[^\[\]]*\])*\](?:\.[xyzw]+)?\s*=(?!=)";
+        return msl.Contains($"&(*{name})", StringComparison.Ordinal) || Regex.IsMatch(msl, member);
     }
 
-    static JsonArray Reflect(string stage, string msl, JsonObject res)
+    static void AddNvSemantics(JsonObject e, string nm, string ty, string stage, string msl, JsonObject res)
     {
-        Match body = Regex.Match(msl, @"struct spvDescriptorSetBuffer0\s*\{(.*?)\};", RegexOptions.Singleline);
-        var binds = new List<JsonObject>();
-        foreach (Match m in Regex.Matches(body.Success ? body.Groups[1].Value : "", @"^\s*(.+?)\s+(\w+)\s*\[\[id\((\d+)\)\]\];", RegexOptions.Multiline))
+        Match fm;
+        if (nm == "support_buffer") e["kind"] = "support";
+        else if (ShaderGeometry.Helpers.TryGetValue(nm, out int helper)) { e["kind"] = "geometry"; e["reg"] = helper; }   // the geometry lowering's own buffers (Geometry.cs)
+        else if ((fm = Regex.Match(nm, @"^[a-z]+_c(\d+)\z")).Success)
         {
-            string ty = m.Groups[1].Value.Trim(), nm = m.Groups[2].Value;
-            var e = new JsonObject { ["msl_name"] = nm, ["msl_type"] = ty, ["arg_id"] = ParseInt(m.Groups[3].Value) };
-            Match fm;
-            if (nm == "support_buffer") e["kind"] = "support";
-            else if (ShaderGeometry.Helpers.TryGetValue(nm, out int helper)) { e["kind"] = "geometry"; e["reg"] = helper; }   // the geometry lowering's own buffers (Geometry.cs)
-            else if ((fm = Regex.Match(nm, @"^[a-z]+_c(\d+)\z")).Success)
-            {
-                long n = ParseInt(fm.Groups[1].Value);
-                if (3 <= n && n <= 16) { e["kind"] = "cbuf"; e["reg"] = n - 3; }
-                else { e["kind"] = n == 1 ? "c1" : "drvcb"; e["bank"] = n; }
-            }
-            else if ((fm = Regex.Match(nm, @"^[a-z]+_s(\d+)\z")).Success) { e["kind"] = "sbuf"; e["index"] = ParseInt(fm.Groups[1].Value); }
-            else if (nm.EndsWith("Smplr", StringComparison.Ordinal))
-            {
-                var d = DecodeTex(nm.Substring(0, nm.Length - 5)) ?? throw new RuntimeError($"sampler {nm}: no texture handle in the name");
-                if (d.ty != 0) { e["kind"] = "samp"; e["reg"] = Num(d.s); } else { e["kind"] = "samp_tex"; e["reg"] = Num(d.t); }
-            }
-            else
-            {
-                var d = DecodeTex(nm);
-                if (d == null) e["kind"] = "?";
-                else { e["kind"] = Regex.IsMatch(nm, @"^[a-z]+_i") ? "img" : (ty.Contains("texture_buffer") ? "tbuf" : "tex"); e["reg"] = Num(d.Value.t); }
-            }
-            binds.Add(e);
+            long n = ParseInt(fm.Groups[1].Value);
+            if (3 <= n && n <= 16) { e["kind"] = "cbuf"; e["reg"] = n - 3; }
+            else { e["kind"] = n == 1 ? "c1" : "drvcb"; e["bank"] = n; }
         }
-        long? @base = stage switch { "vs" => 0x110, "cs" => 0x310, "ps" => 0x510, "gs" => GsSsboBase, _ => null };
-        List<JsonObject> sbSorted = res["sbufs"].AsArray().Select(b => b.AsObject()).OrderBy(b => Long(b["binding"])).ToList();   // stable, as sorted()
-        foreach (JsonObject e in binds)
+        else if ((fm = Regex.Match(nm, @"^[a-z]+_s(\d+)\z")).Success) e["kind"] = "sbuf";
+        else if (nm.EndsWith("Smplr", StringComparison.Ordinal))
         {
-            if ((string)e["kind"] != "sbuf") continue;
+            var d = DecodeTex(nm.Substring(0, nm.Length - 5)) ?? throw new RuntimeError($"sampler {nm}: no texture handle in the name");
+            if (d.ty != 0) { e["kind"] = "samp"; e["reg"] = Num(d.s); } else { e["kind"] = "samp_tex"; e["reg"] = Num(d.t); }
+        }
+        else
+        {
+            var d = DecodeTex(nm);
+            if (d == null) e["kind"] = "?";
+            else { e["kind"] = Regex.IsMatch(nm, @"^[a-z]+_i") ? "img" : (ty.Contains("texture_buffer") ? "tbuf" : "tex"); e["reg"] = Num(d.Value.t); }
+        }
+        if ((string)e["kind"] == "sbuf") e["index"] = ParseInt(Regex.Match(nm, @"^[a-z]+_s(\d+)\z").Groups[1].Value);
+        long? @base = stage switch { "vs" => 0x110, "cs" => 0x310, "ps" => 0x510, "gs" => GsSsboBase, _ => null };
+        if ((string)e["kind"] == "sbuf")
+        {
+            List<JsonObject> sbSorted = res["sbufs"].AsArray().Select(b => b.AsObject()).OrderBy(b => Long(b["binding"])).ToList();   // stable, as sorted()
             long index = Long(e["index"]);
             JsonObject b = index < sbSorted.Count ? sbSorted[(int)index] : null;
             long cbSlot = b != null ? Long(b["cb_slot"]) : 0, cbOffset = b != null ? Long(b["cb_offset"]) : 0;
@@ -334,7 +338,94 @@ static partial class ShaderService
             }
             else e["reg"] = off != null && @base != null && 0 <= off - @base && off - @base < 0x100 && (off - @base) % 16 == 0 ? Num((off - @base) / 16) : null;
             // Ryujinx BufferUsageFlags.Write is 1 << 0; the MSL is the other witness: a store or an atomic through the binding
-            e["rw"] = (b != null && (Long(b["flags"]) & 1) != 0) || MslStoresThrough(msl, (string)e["msl_name"]);
+            e["rw"] = (b != null && (Long(b["flags"]) & 1) != 0) || MslStoresThrough(msl, nm);
+        }
+    }
+
+    static JsonArray Reflect(string stage, string msl, JsonObject res, string entryName = "main0")
+    {
+        var binds = new List<JsonObject>();
+        if (bindingAbi == "ab")
+        {
+            Match body = Regex.Match(msl, @"struct spvDescriptorSetBuffer0\s*\{(.*?)\};", RegexOptions.Singleline);
+            foreach (Match m in Regex.Matches(body.Success ? body.Groups[1].Value : "", @"^\s*(.+?)\s+(\w+)\s*\[\[id\((\d+)\)\]\];", RegexOptions.Multiline))
+            {
+                string ty = m.Groups[1].Value.Trim(), nm = m.Groups[2].Value;
+                var e = new JsonObject { ["msl_name"] = nm, ["msl_type"] = ty, ["arg_id"] = ParseInt(m.Groups[3].Value) };
+                AddNvSemantics(e, nm, ty, stage, msl, res);
+                binds.Add(e);
+            }
+        }
+        else
+        {
+            // Only resources on the selected MSL entry point are bindings. Helper functions and other entry points can
+            // repeat resource attributes, which are not a second view of the host binding table.
+            Match signature = Regex.Match(msl, @"(?m)^\s*(?:vertex|fragment|kernel)\s+[^\r\n;{}]*?\b" + Regex.Escape(entryName) + @"\s*\(");
+            if (!signature.Success) throw new RuntimeError("discrete-v1 has no MSL entry point signature");
+            int open = signature.Index + signature.Length - 1, depth = 1, angle = 0, square = 0;
+            int start = open + 1;
+            var parameters = new List<string>();
+            for (int i = open + 1; i < msl.Length; i++)
+            {
+                char c = msl[i];
+                if (c == '(') depth++;
+                else if (c == ')')
+                {
+                    if (--depth == 0)
+                    {
+                        string last = msl.Substring(start, i - start).Trim();
+                        if (last.Length > 0) parameters.Add(last);
+                        break;
+                    }
+                }
+                else if (c == '<') angle++;
+                else if (c == '>' && angle > 0) angle--;
+                else if (c == '[') square++;
+                else if (c == ']' && square > 0) square--;
+                else if (c == ',' && depth == 1 && angle == 0 && square == 0)
+                {
+                    parameters.Add(msl.Substring(start, i - start).Trim());
+                    start = i + 1;
+                }
+            }
+            if (depth != 0) throw new RuntimeError("discrete-v1 has an unterminated MSL entry point signature");
+            var slots = new Dictionary<string, string>();
+            foreach (string parameter in parameters)
+            {
+                Match attr = Regex.Match(parameter, @"\[\[\s*(?<class>buffer|texture|sampler)\((?<slot>\d+)\)\s*\]\]");
+                if (!attr.Success)
+                {
+                    if (Regex.IsMatch(parameter, @"\[\[\s*(?:buffer|texture|sampler)\b") ||
+                        Regex.IsMatch(parameter, @"^\s*(?:constant|device|threadgroup)\s+|\b(?:texture\w*|depth\w*)\s*<|\bsampler(?:_comparison)?\s+"))
+                        throw new RuntimeError($"discrete-v1 entry resource is not recognized: {parameter}");
+                    continue;
+                }
+                string decl = parameter.Substring(0, attr.Index).Trim();
+                Match d = Regex.Match(decl, @"^(?<type>.+?)\s+(?<name>[A-Za-z_]\w*)$");
+                if (!d.Success) throw new RuntimeError($"discrete-v1 resource declaration not recognized: {decl}");
+                string ty = d.Groups["type"].Value.Trim(), nm = d.Groups["name"].Value, cls = attr.Groups["class"].Value;
+                long slot = ParseInt(attr.Groups["slot"].Value);
+                long limit = cls switch { "buffer" => 31, "texture" => 96, "sampler" => 16, _ => throw new RuntimeError($"discrete-v1 unknown resource class {cls}") };
+                if (slot >= limit) throw new RuntimeError($"discrete-v1 {cls} slot {slot} for {nm} exceeds A12Z Family5 Tier1 limit {limit}");
+                string slotKey = cls + ":" + slot.ToString(CultureInfo.InvariantCulture);
+                if (slots.TryGetValue(slotKey, out string prior)) throw new RuntimeError($"discrete-v1 duplicate {cls} slot {slot}: {prior} and {nm}");
+                slots.Add(slotKey, nm);
+                var e = new JsonObject { ["msl_name"] = nm, ["msl_type"] = ty, ["metal_class"] = cls, ["metal_slot"] = slot };
+                AddNvSemantics(e, nm, ty, stage, msl, res);
+                string kind = (string)e["kind"];
+                if (kind == "?") throw new RuntimeError($"discrete-v1 {cls} resource {nm}: no NVN semantic binding");
+                bool classMatches = cls switch
+                {
+                    "buffer" => kind is "support" or "geometry" or "cbuf" or "c1" or "drvcb" or "sbuf" or "ubo_ptr" or "sbuf_ubo",
+                    "texture" => kind is "tex" or "img" or "tbuf",
+                    "sampler" => kind is "samp" or "samp_tex",
+                    _ => false,
+                };
+                if (!classMatches) throw new RuntimeError($"discrete-v1 NVN kind {kind} for {nm} cannot bind as Metal {cls}");
+                if ((kind is "cbuf" or "samp" or "samp_tex" or "tex" or "img" or "tbuf" or "sbuf" or "ubo_ptr" or "sbuf_ubo") && e["reg"] == null)
+                    throw new RuntimeError($"discrete-v1 {cls} resource {nm}: no NVN register mapping");
+                binds.Add(e);
+            }
         }
         return new JsonArray(binds.Select(x => (JsonNode)x).ToArray());
     }
@@ -345,7 +436,8 @@ static partial class ShaderService
         foreach (int bank in new[] { 0, 2 })
         {
             var offs = new SortedSet<long>(); bool dyn = false;
-            foreach (Match m in Regex.Matches(src, StagePrefix[stage] + "_c" + bank.ToString(CultureInfo.InvariantCulture) + @"\)\._m0\[([^\]]+)\]"))
+            string member = Regex.Escape(StagePrefix[stage] + "_c" + bank.ToString(CultureInfo.InvariantCulture));
+            foreach (Match m in Regex.Matches(src, @"(?:\(\*(?:spvDescriptorSet0\.)?" + member + @"\)|(?:spvDescriptorSet0\.)?" + member + @")\._m0\[([^\]]+)\]"))
             {
                 string idx = m.Groups[1].Value.TrimEnd('u');
                 if (idx.Length > 0 && idx.All(c => c >= '0' && c <= '9')) offs.Add(ParseInt(idx) * 16); else dyn = true;
@@ -376,8 +468,8 @@ static partial class ShaderService
 
     // SPIRV-Cross's own program, compiled into this one (spirv_cross_inproc.cpp, linked by publish_native.sh): the same MSL
     // without a process per shader. TOTK_XLATE_SPIRV_CROSS=process runs the --spirv-cross program instead, as before.
-    [DllImport("totk_spirv_cross", EntryPoint = "totk_spirv_cross_msl")]
-    static extern unsafe int SpirvCrossMsl(uint* words, nuint count, uint mslVersion, out IntPtr msl, out IntPtr err);
+    [DllImport("totk_spirv_cross", EntryPoint = "totk_spirv_cross_msl_abi")]
+    static extern unsafe int SpirvCrossMsl(uint* words, nuint count, uint mslVersion, int argumentBuffers, out IntPtr msl, out IntPtr err);
 
     // Image atomics run on the Metal texture itself (MSL 3.1 texture atomics; from seedds/nxnative f8642c48, MIT): below 3.1
     // SPIRV-Cross emulates them through a raw pointer beside the texture, which a deswizzled block-linear copy does not share, a 3D
@@ -406,7 +498,7 @@ static partial class ShaderService
         {
             byte[] bytes = File.ReadAllBytes(spv);
             int rc; IntPtr mslText, errText;
-            fixed (byte* b = bytes) rc = SpirvCrossMsl((uint*)b, (nuint)(bytes.Length / 4), MslVersion(bytes), out mslText, out errText);
+            fixed (byte* b = bytes) rc = SpirvCrossMsl((uint*)b, (nuint)(bytes.Length / 4), MslVersion(bytes), bindingAbi == "ab" ? 1 : 0, out mslText, out errText);
             try
             {
                 if (rc != 0) throw new RuntimeError(what + Cut((Marshal.PtrToStringUTF8(errText) ?? "").Trim(), 300));
@@ -419,7 +511,11 @@ static partial class ShaderService
         }
         var psi = new ProcessStartInfo(spirvCross) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
         uint version = MslVersion(File.ReadAllBytes(spv));
-        foreach (string a in Xc) psi.ArgumentList.Add(a == "20300" ? version.ToString(CultureInfo.InvariantCulture) : a);
+        foreach (string a in Xc)
+        {
+            if (bindingAbi != "ab" && a == "--msl-argument-buffers") continue;
+            psi.ArgumentList.Add(a == "20300" ? version.ToString(CultureInfo.InvariantCulture) : a);
+        }
         psi.ArgumentList.Add(spv); psi.ArgumentList.Add("--output"); psi.ArgumentList.Add(msl);
         using Process p = Process.Start(psi) ?? throw new RuntimeError(what + "could not start " + spirvCross);
         var err = p.StandardError.ReadToEndAsync(); var outp = p.StandardOutput.ReadToEndAsync();
@@ -457,6 +553,8 @@ static partial class ShaderService
     static void Handle(JsonObject rq)
     {
         string variant = (string)rq["variant"], stage = (string)rq["stage"];
+        if (bindingAbi == "discrete-v1" && (stage == "gs" || Truthy(Get(rq, "geometry_capture"))))
+            throw new RuntimeError("discrete-v1 does not support geometry lowering or capture resources yet");
         if (stage == "gs") { HandleGeometry(rq); return; }   // GeometryService.cs
         if (stage != "vs" && stage != "ps" && stage != "cs") throw new RuntimeError($"stage {stage} not supported by the translation chain");
         bool capture = Truthy(Get(rq, "geometry_capture"));   // a vertex shader that feeds a geometry kernel: main0_gs (GeometryService.cs)
@@ -503,7 +601,7 @@ static partial class ShaderService
             File.WriteAllText(msl, src);
         // the capture entry point after main0 (it reuses main0's structs and helpers); the reflection below reads main0 only
         JsonObject captureInfo = capture ? AppendCapture(rq, job, variant, src, msl) : null;
-        Match entry = Regex.Match(src, @"(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(");
+        Match entry = Regex.Match(src, @"(?m)^\s*(?<kind>vertex|fragment|kernel)\s+[^\r\n;{}]*?\b(?<name>[A-Za-z_]\w*)\s*\(");
         JsonObject dr = DrvReads(src, stage);
         JsonArray unfillable = Unfillable(dr, stage);
         var vertexInputs = new JsonArray(Regex.Matches(src, @"(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]")
@@ -522,12 +620,13 @@ static partial class ShaderService
         var refl = new JsonObject
         {
             ["key"] = variant + "_b", ["route"] = "B", ["chain"] = chain, ["stage"] = stage,
-            ["entry"] = entry.Success ? entry.Groups[2].Value : "main0", ["msl_entry_kind"] = entry.Success ? entry.Groups[1].Value : null,
+            ["entry"] = entry.Success ? entry.Groups["name"].Value : "main0", ["msl_entry_kind"] = entry.Success ? entry.Groups["kind"].Value : null,
             ["threadgroup_size"] = GetOr(rq, "local", null), ["c1"] = GetStr(rq, "c1", ""), ["notes"] = res["notes"].DeepClone(),
-            ["drv_reads"] = dr, ["drv_unfillable"] = unfillable, ["bindings"] = Reflect(stage, src, res),
+            ["drv_reads"] = dr, ["drv_unfillable"] = unfillable, ["bindings"] = Reflect(stage, src, res, entry.Success ? entry.Groups["name"].Value : "main0"),
             ["vertex_inputs"] = vertexInputs, ["raster"] = new JsonObject(), ["deps"] = deps, ["softfloat64"] = softfloat64,
             ["compare_slots"] = new JsonArray(compareSlots.Select(s => (JsonNode)s).ToArray()),
         };
+        if (bindingAbi != "ab") refl["bind_model"] = bindingAbi;
         if (captureInfo != null) { refl["entry_geometry_capture"] = "main0_gs"; refl["geometry_capture"] = captureInfo; }
         WriteReflection(variant + "_b", refl);
     }
@@ -556,7 +655,7 @@ static partial class ShaderService
     // The texture / image answers a translation depends on (deps "tex" and "img"; "attr" / "fout" are left to the caller)
     static JsonObject TextureDeps(string src, JsonObject res, JsonObject tex, JsonObject img, HashSet<long> depthSlots)
     {
-        var usedSlots = new HashSet<long>(Regex.Matches(src, @"\b(texture\w+|depth\w+)<float>\s+(\w+)\s*\[\[id\(\d+\)\]\]").Select(m => TexSlotOfName(m.Groups[2].Value)));
+        var usedSlots = new HashSet<long>(Regex.Matches(src, @"\b(texture\w+|depth\w+)<[^>]+>\s+(\w+)\s*\[\[(?:id|texture)\(\d+\)\]\]").Select(m => TexSlotOfName(m.Groups[2].Value)));
         usedSlots.Remove(-1);
         var deps = new JsonObject { ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject() };
         IEnumerable<long> Ints(string key) => res.TryGetPropertyValue(key, out JsonNode a) && a is JsonArray arr ? arr.Select(Long) : Enumerable.Empty<long>();
@@ -640,28 +739,32 @@ static partial class ShaderService
         sb.Append('"');
     }
 
-    // totk_xlate --service --spirv-cross <path> --out <dir> --chain <name> [--debug-mode 0|1]
+    // totk_xlate --service --spirv-cross <path> --out <dir> --chain <name> [--binding-abi ab|discrete-v1] [--debug-mode 0|1]
     public static int Run(string[] args)
     {
         string dm = Environment.GetEnvironmentVariable("TOTK_SHADER_DEBUGMODE");
         debugMode = string.IsNullOrEmpty(dm) ? 1 : (int)ParseInt(dm.Trim());
+        string requestedOutDir = null, requestedAbi = "ab";
         for (int i = 1; i < args.Length; i++)
         {
             string v = i + 1 < args.Length ? args[i + 1] : null;
             switch (args[i])
             {
                 case "--spirv-cross": spirvCross = v; i++; break;
-                case "--out": outDir = v; i++; break;
+                case "--out": requestedOutDir = v; i++; break;
                 case "--chain": chain = v; i++; break;
+                case "--binding-abi": requestedAbi = v; i++; break;
                 case "--debug-mode": debugMode = (int)ParseInt(v); i++; break;
                 default: Console.Error.WriteLine($"totk_xlate --service: unknown argument {args[i]}"); return 2;
             }
         }
-        if (spirvCross == null || outDir == null || chain == null)
+        if (spirvCross == null || requestedOutDir == null || chain == null || (requestedAbi != "ab" && requestedAbi != "discrete-v1"))
         {
-            Console.Error.WriteLine("usage: totk_xlate --service --spirv-cross <path> --out <dir> --chain <name> [--debug-mode 0|1]");
+            Console.Error.WriteLine("usage: totk_xlate --service --spirv-cross <path> --out <dir> --chain <name> [--binding-abi ab|discrete-v1] [--debug-mode 0|1]");
             return 2;
         }
+        bindingAbi = requestedAbi;
+        outDir = BindingOutputDirectory(requestedOutDir, bindingAbi);
         Directory.CreateDirectory(outDir);
         var stdout = Console.Out;
         string line;
@@ -678,7 +781,7 @@ static partial class ShaderService
     // one request line at a time, with the reply the service would write. SPIRV-Cross is the linked-in one.
     public static void Configure(string outDirectory, string chainName, int debug)
     {
-        outDir = outDirectory; chain = chainName; debugMode = debug; spirvCross ??= "(linked in)";
+        bindingAbi = "ab"; outDir = BindingOutputDirectory(outDirectory, bindingAbi); chain = chainName; debugMode = debug; spirvCross ??= "(linked in)";
         Directory.CreateDirectory(outDir);
     }
     public static string HandleLine(string line)

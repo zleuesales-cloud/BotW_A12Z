@@ -11,6 +11,9 @@
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
   <!-- The iPhone / iPad library (publish_ios_lib.sh): the same service as a static library the app links (LibExports.cs);
        SPIRV-Cross is resolved when the app is linked (build_ipa.py builds it from the pinned sources). -->
   <PropertyGroup Condition="'$(TotkXlateLib)' == 'true'">

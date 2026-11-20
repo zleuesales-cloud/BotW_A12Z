@@ -112,5 +112,16 @@
     "spirv_cross_commit": "aa217aeb6c9f0ace7a0ab233b28807edf45eb165",
     "dependency_owner": "upstream/tools/deps/pins.py",
     "status": "pinned NativeAOT rebuild passed per Luna; shader ABI review in progress"
+  },
+  "shader_producer": {
+    "status": "discrete-v1 compiler implemented and reviewed; runtime consumer not integrated",
+    "abi": "discrete-v1",
+    "namespace_suffix": ".discrete-v1",
+    "nativeaot_sha256": "66934c7feba2c860144ebbec1cdcc204df83de136ce55a515843bfbdf6a676e5",
+    "available_title_variants": 16,
+    "legacy_title_variants_missing": 10,
+    "tests": "3 seed tests, reflection regression and legacy/new native exports passed; selected AB parity and inproc/process parity reported by Luna",
+    "limits": "buffer31 texture96 sampler16; geometry/capture explicitly rejected in discrete mode",
+    "device_gameplay": "not tested"
   }
 }

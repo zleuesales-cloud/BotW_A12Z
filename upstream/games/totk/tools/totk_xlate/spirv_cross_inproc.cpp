@@ -41,11 +41,11 @@ struct CliExit : std::runtime_error
 #undef main
 #undef exit
 
-// spirv-cross --msl --msl-version 20300 --msl-argument-buffers --msl-texture-buffer-native --msl-pad-fragment-output
-// (Service.cs Xc) on the SPIR-V words, at MSL msl_version (20300, or 30100 for a shader with image atomics, Service.cs MslVersion).
+// Service.cs Xc on the SPIR-V words; argument-buffer mode is the argument_buffers value. MSL msl_version is 20300, or
+// 30100 for a shader with image atomics (Service.cs MslVersion).
 // Returns 0 and the MSL in *out, or 1 and the message the program printed in *err;
 // free either with totk_spirv_cross_free.
-extern "C" int totk_spirv_cross_msl(const uint32_t *words, size_t count, uint32_t msl_version, char **out, char **err)
+static int totk_spirv_cross_msl_impl(const uint32_t *words, size_t count, uint32_t msl_version, int argument_buffers, char **out, char **err)
 {
 	*out = nullptr;
 	*err = nullptr;
@@ -55,7 +55,7 @@ extern "C" int totk_spirv_cross_msl(const uint32_t *words, size_t count, uint32_
 		args.msl = true;
 		args.msl_version = msl_version;
 		args.set_msl_version = true;
-		args.msl_argument_buffers = true;
+		args.msl_argument_buffers = argument_buffers != 0;
 		args.msl_texture_buffer_native = true;
 		args.msl_pad_fragment_output = true;
 		std::string msl = compile_iteration(args, std::vector<uint32_t>(words, words + count));
@@ -67,6 +67,19 @@ extern "C" int totk_spirv_cross_msl(const uint32_t *words, size_t count, uint32_
 		*err = strdup((std::string("SPIRV-Cross threw an exception: ") + e.what()).c_str());
 		return 1;
 	}
+}
+
+// New ABI-aware entry point. Keep this symbol distinct from the original five-argument ABI below: old native callers
+// continue to request argument buffers, while current Service.cs explicitly selects the versioned interface.
+extern "C" int totk_spirv_cross_msl_abi(const uint32_t *words, size_t count, uint32_t msl_version, int argument_buffers, char **out, char **err)
+{
+	return totk_spirv_cross_msl_impl(words, count, msl_version, argument_buffers, out, err);
+}
+
+// Legacy ABI retained for existing NativeAOT / iOS callers; its behavior remains AB by definition.
+extern "C" int totk_spirv_cross_msl(const uint32_t *words, size_t count, uint32_t msl_version, char **out, char **err)
+{
+	return totk_spirv_cross_msl_impl(words, count, msl_version, 1, out, err);
 }
 
 extern "C" void totk_spirv_cross_free(char *p)

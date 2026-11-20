@@ -1,0 +1,12 @@
+discrete-v1 producer checkpoint
+Executor: lunna_shader_audit (GPT-6 Luna, max); parent reviewed interfaces, ABI isolation, cache namespaces and output hash.
+Artifact: /tmp/totk-abi-final-rebuild/out/totk_xlate
+SHA256: 66934c7feba2c860144ebbec1cdcc204df83de136ce55a515843bfbdf6a676e5
+SPIRV-Cross: aa217aeb6c9f0ace7a0ab233b28807edf45eb165; SDK/runtime 10.0.403/10.0.14
+Seed tests: python3 -m unittest discover -s upstream/games/totk/scripts/tests -v (3 pass, parent verified).
+Executor reports C# reflection regressions and legacy/new C export probe pass.
+Final service re-reflection of 16 genuine title MSLs checked 27 resources.
+Prior selected production translations: 16/26 legacy title variants available; AB matches prior prebuilt output, in-process/external SPIRV-Cross outputs identical. Ten unavailable legacy inputs remain explicitly missing.
+Direct and AB driver reads preserved; sampler slots not merged or truncated.
+Runtime parser remains rejecting discrete-v1 until matching native binder is integrated.
+No iPad gameplay validation; generated shaders and game inputs excluded from Git.
