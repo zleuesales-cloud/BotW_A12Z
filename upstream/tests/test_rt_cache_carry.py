@@ -16,8 +16,34 @@ import unittest
 NVN = Path(__file__).resolve().parents[1] / 'games/totk/third_party/d2r_gfx/gfx/nvn'
 
 PROGRAM = r'''#import <Foundation/Foundation.h>
+#include <assert.h>
 %s
+static void abi_helpers(void) {
+    totk_rt_binding_abi_state state = {0};
+    assert(totk_rt_binding_abi_select(&state, @"discrete-v1") == TOTK_RT_ABI_OK);
+    NSString *base = @"/tmp/shader-cache/rt-chain";
+    NSString *discrete = totk_rt_binding_abi_cache_directory(base, YES);
+    assert([discrete isEqualToString:@"/tmp/shader-cache/rt-chain.discrete-v1"]);
+    assert([totk_rt_binding_abi_cache_directory(discrete, YES) isEqualToString:discrete]);
+    assert(totk_rt_binding_abi_cache_directory(discrete, NO) == nil);
+    NSString *retired = @"/tmp/shader-cache/rt-chain.discrete-v1-retired-old-1";
+    assert(totk_rt_binding_abi_path_is_discrete(retired));
+    assert(!totk_rt_binding_abi_active_path_is_discrete(retired));
+    assert([[totk_rt_binding_abi_cache_directory(retired, YES) description] isEqualToString:
+            @"/tmp/shader-cache/rt-chain.discrete-v1-retired-old-1.discrete-v1"]);
+    assert(totk_rt_binding_abi_cache_directory(retired, NO) == nil);
+    NSString *ab_retired = @"/tmp/shader-cache/rt-chain-retired-old-1";
+    assert([[totk_rt_binding_abi_cache_directory(ab_retired, NO) description] isEqualToString:ab_retired]);
+    assert(totk_rt_binding_abi_paths_match(retired, @"/tmp/shader-cache/rt-chain-ab"));
+    totk_rt_binding_abi_freeze(&state);
+    assert(totk_rt_binding_abi_select(&state, @"ab") == TOTK_RT_ABI_FROZEN);
+    assert(totk_rt_binding_abi_select(&state, @"discrete-v1") == TOTK_RT_ABI_OK);
+    assert(state.discrete_v1);
+    assert(totk_rt_binding_abi_select(&state, nil) == TOTK_RT_ABI_INVALID);
+    assert(totk_rt_binding_abi_select(&state, @"future") == TOTK_RT_ABI_INVALID);
+}
 int main(int argc, char **argv) { @autoreleasepool {
+    abi_helpers();
     for (NSString *from in totk_rt_carry_over(@(argv[1]))) printf("moved %%s\n", from.UTF8String);
     return 0;
 } }
@@ -44,6 +70,12 @@ class CarryOver(unittest.TestCase):
         built = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-framework', 'Foundation', str(source), '-o', str(self.exe)],
                                capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
+        sibling_source = self.base/'siblings.m'
+        sibling_source.write_text(SIBLINGS % (NVN/'totk_rt_carry.h').read_text())
+        self.sibling_exe = self.base/'siblings'
+        built = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-framework', 'Foundation', str(sibling_source), '-o', str(self.sibling_exe)],
+                               capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -64,6 +96,9 @@ class CarryOver(unittest.TestCase):
 
     def run_carry(self, d):
         return subprocess.run([str(self.exe), str(d)], capture_output=True, text=True, check=True).stdout.splitlines()
+
+    def run_siblings(self, d):
+        return subprocess.run([str(self.sibling_exe), str(d)], capture_output=True, text=True, check=True).stdout.splitlines()
 
     def test_the_newest_archive_and_list_come_to_the_new_folder(self):
         self.folder('rt-v27-aaa', ['a.metalarchive'], 'R\told\n', age=3000)
@@ -100,16 +135,28 @@ class CarryOver(unittest.TestCase):
         (self.cache / 'rt-file').write_text('not a folder')
         (self.cache / 'other').mkdir(parents=True)
         new = self.cache / 'rt-v29-ccc'; new.mkdir()
-        source = self.base / 'siblings.m'
-        source.write_text(SIBLINGS % (NVN / 'totk_rt_carry.h').read_text())
-        exe = self.base / 'siblings'
-        built = subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-framework', 'Foundation', str(source), '-o', str(exe)],
-                               capture_output=True, text=True)
-        self.assertEqual(built.returncode, 0, built.stderr)
-        listed = subprocess.run([str(exe), str(new)], capture_output=True, text=True, check=True).stdout.split()
+        listed = self.run_siblings(new)
         self.assertEqual([Path(p).name for p in listed], ['rt-v29-ccc-retired-unrecorded-1', 'rt-v28-old'])
-        other = subprocess.run([str(exe), str(self.cache / 'other')], capture_output=True, text=True, check=True).stdout.split()
+        other = self.run_siblings(self.cache / 'other')
         self.assertEqual(other, [])
+
+    def test_discrete_caches_only_read_and_carry_discrete_siblings(self):
+        now = time.time()
+        ab = self.folder('rt-v28-ab', ['ab.metalarchive'], 'R\tAB\n', age=5)
+        discrete = self.folder('rt-v29.discrete-v1', ['discrete.metalarchive'], 'R\tD\n', age=100)
+        retired = self.folder('rt-v27.discrete-v1-retired-old-1', ['retired.metalarchive'], 'R\told D\n', age=3000)
+        os.utime(ab, (now-5, now-5)); os.utime(discrete, (now-100, now-100)); os.utime(retired, (now-3000, now-3000))
+        new = self.cache/'rt-v30.discrete-v1'; new.mkdir()
+        self.assertEqual([Path(p).name for p in self.run_siblings(new)],
+                         ['rt-v29.discrete-v1', 'rt-v27.discrete-v1-retired-old-1'])
+        moved = self.run_carry(new)
+        self.assertEqual({Path(p).parent.name for p in moved}, {discrete.name})
+        self.assertTrue((new/'pipelines/discrete.metalarchive').is_file())
+        self.assertEqual((new/'pso_collected.tsv').read_text(), 'R\tD\n')
+        self.assertTrue((ab/'pipelines/ab.metalarchive').is_file())
+        self.assertTrue((retired/'pipelines/retired.metalarchive').is_file())
+        ab_target = self.cache/'rt-v31-ab'; ab_target.mkdir()
+        self.assertEqual([Path(p).name for p in self.run_siblings(ab_target)], ['rt-v28-ab'])
 
     def test_the_runtime_calls_it_for_its_folder(self):
         rt = (NVN / 'totk_shader_rt.m').read_text()

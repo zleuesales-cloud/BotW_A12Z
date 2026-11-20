@@ -1,0 +1,11 @@
+Runtime shader ABI/cache checkpoint
+Executor: lunna_shader_audit (GPT-6 Luna, max); parent reviewed default compatibility, frozen state, cache/retired directory classification and seed/fill isolation.
+Mode setter must run before first cache/service use; no renderer activation in this commit.
+Default AB keeps legacy process arguments and output identity.
+Discrete runtime cache and service output share exact .discrete-v1 suffix; sibling/carry-over and seed import reject cross-ABI reuse.
+Legitimate foreign-ABI fill packs remain deferred, not deleted. AB overrides targeting discrete retired directories are rejected.
+Legacy totk_xlate_init export retained; distinct totk_xlate_init_abi added.
+Reported focused validation: test_rt_cache_carry.py 6/6, seed+reflection 37/37; managed build, C# fixture, iOS arm64 NativeAOT static build pass.
+Archive: /tmp/totk-runtime-abi-check/ios/out/totk_xlate.a
+SHA256: ef4db6c88843c44b450596f79b0ecf2304da3bbac76c1811ab8c80313489ac5d
+No iPad game execution or matching native slot binder validation.

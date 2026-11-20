@@ -13,6 +13,15 @@ static unsafe class LibExports
         catch (Exception) { return -1; }
     }
 
+    // Versioned addition: keep the original three-argument export as the AB-default ABI.
+    [UnmanagedCallersOnly(EntryPoint = "totk_xlate_init_abi")]
+    static int InitAbi(byte* outDir, byte* chain, int debugMode, byte* bindingAbi)
+    {
+        try { ShaderService.ConfigureAbi(Marshal.PtrToStringUTF8((IntPtr)outDir), Marshal.PtrToStringUTF8((IntPtr)chain),
+                debugMode, Marshal.PtrToStringUTF8((IntPtr)bindingAbi)); return 0; }
+        catch (Exception) { return -1; }
+    }
+
     // One request (a JSON line, as the service reads it); the reply goes into reply (size bytes, always terminated).
     // Returns 1 when the reply is {"ok": true}, 0 for an error reply, -1 when reply is too small.
     [UnmanagedCallersOnly(EntryPoint = "totk_xlate_request")]

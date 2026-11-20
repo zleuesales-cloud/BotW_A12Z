@@ -781,7 +781,13 @@ static partial class ShaderService
     // one request line at a time, with the reply the service would write. SPIRV-Cross is the linked-in one.
     public static void Configure(string outDirectory, string chainName, int debug)
     {
-        bindingAbi = "ab"; outDir = BindingOutputDirectory(outDirectory, bindingAbi); chain = chainName; debugMode = debug; spirvCross ??= "(linked in)";
+        ConfigureAbi(outDirectory, chainName, debug, "ab");
+    }
+
+    public static void ConfigureAbi(string outDirectory, string chainName, int debug, string requestedAbi)
+    {
+        if (requestedAbi != "ab" && requestedAbi != "discrete-v1") throw new RuntimeError($"unsupported binding ABI: {requestedAbi}");
+        bindingAbi = requestedAbi; outDir = BindingOutputDirectory(outDirectory, bindingAbi); chain = chainName; debugMode = debug; spirvCross ??= "(linked in)";
         Directory.CreateDirectory(outDir);
     }
     public static string HandleLine(string line)

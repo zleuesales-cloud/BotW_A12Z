@@ -3,6 +3,8 @@
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
 #include <stdint.h>
+// Selects the runtime translator/cache ABI before first use: 0 success, 1 invalid model, 2 changed after freeze.
+int totk_rt_set_binding_abi(const char *abi);
 NSString *totk_rt_dir(void);
 // A file of the translation cache by name: the cache folder, or on iOS the seed inside the app for the files it brings
 // (read in place, never copied). totk_rt_list: every file name of both, sorted.

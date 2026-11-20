@@ -2,6 +2,8 @@ using System;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Runtime.ExceptionServices;
 
 static class ReflectionBindingTests
@@ -63,6 +65,45 @@ static class ReflectionBindingTests
             new object[] { "auto a = fp_c0._m0[2]; auto b = fp_c2._m0[5];", "ps" })!;
         Check((long)reads["0"]!["vec4_offsets"]![0]! == 32, "discrete c0 read was not recorded");
         Check((long)reads["2"]!["vec4_offsets"]![0]! == 80, "discrete c2 read was not recorded");
+
+        MethodInfo configure = shaderService.GetMethod("Configure", flags | BindingFlags.Public)!;
+        MethodInfo configureAbi = shaderService.GetMethod("ConfigureAbi", flags | BindingFlags.Public)!;
+        var abiField = shaderService.GetField("bindingAbi", flags)!;
+        var outField = shaderService.GetField("outDir", flags)!;
+        string root = Path.Combine(Path.GetTempPath(), "totk-xlate-abi-" + Guid.NewGuid().ToString("N"));
+        string discreteRoot = root + ".discrete-v1";
+        try
+        {
+            configureAbi.Invoke(null, new object[] { root, "chain", 1, "discrete-v1" });
+            Check((string?)abiField.GetValue(null) == "discrete-v1" && (string?)outField.GetValue(null) == discreteRoot,
+                "discrete service did not select its isolated output namespace");
+            configureAbi.Invoke(null, new object[] { discreteRoot, "chain", 1, "discrete-v1" });
+            Check((string?)outField.GetValue(null) == discreteRoot, "discrete service double-suffixed its output namespace");
+            configure.Invoke(null, new object[] { root, "chain", 1 });
+            Check((string?)abiField.GetValue(null) == "ab" && (string?)outField.GetValue(null) == root,
+                "legacy service configuration no longer selects AB");
+            try
+            {
+                configureAbi.Invoke(null, new object[] { discreteRoot, "chain", 1, "ab" });
+                throw new InvalidOperationException("AB service accepted a discrete-v1 output root");
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException is not null && ex.InnerException.Message.Contains("reserved for the discrete-v1 namespace", StringComparison.Ordinal)) { }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            if (Directory.Exists(discreteRoot)) Directory.Delete(discreteRoot, recursive: true);
+        }
+
+        Type exports = service.GetType("LibExports", throwOnError: true)!;
+        var legacyInit = exports.GetMethod("Init", flags)!;
+        var abiInit = exports.GetMethod("InitAbi", flags)!;
+        Check(legacyInit.GetParameters().Length == 3 &&
+              legacyInit.GetCustomAttribute<UnmanagedCallersOnlyAttribute>()?.EntryPoint == "totk_xlate_init",
+            "legacy NativeAOT initializer export or signature changed");
+        Check(abiInit.GetParameters().Length == 4 &&
+              abiInit.GetCustomAttribute<UnmanagedCallersOnlyAttribute>()?.EntryPoint == "totk_xlate_init_abi",
+            "ABI-aware NativeAOT initializer is missing or reused the legacy export");
         Console.WriteLine("discrete reflection fixture passed");
     }
 }

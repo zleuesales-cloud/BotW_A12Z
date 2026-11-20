@@ -59,10 +59,24 @@ typedef struct { FILE *in, *out; } rt_svc;   // one translator service process
 #if TARGET_OS_IPHONE && defined(TOTK_DEVICE_XLATE)
 #define DEVICE_XLATE 1
 int totk_xlate_init(const char *out_dir, const char *chain, int debug_mode);
+int totk_xlate_init_abi(const char *out_dir, const char *chain, int debug_mode, const char *binding_abi);
 int totk_xlate_request(const char *json, char *reply, int size);
 #endif
 static rt_svc g_svc;   // the caller's (the submit thread); background jobs have their own (bg_translate)
 static NSString *g_root, *g_dir;
+static pthread_mutex_t g_rt_abi_lock = PTHREAD_MUTEX_INITIALIZER;
+static totk_rt_binding_abi_state g_rt_abi;
+
+int totk_rt_set_binding_abi(const char *abi) {
+    NSString *name = abi ? [NSString stringWithUTF8String:abi] : nil;
+    if (!name) return TOTK_RT_ABI_INVALID;
+    pthread_mutex_lock(&g_rt_abi_lock);
+    int result = totk_rt_binding_abi_select(&g_rt_abi, name);
+    pthread_mutex_unlock(&g_rt_abi_lock);
+    return result;
+}
+
+static const char *rt_binding_abi_name(void) { return g_rt_abi.discrete_v1 ? "discrete-v1" : "ab"; }
 /* iOS: the seed inside the signed app is read where it is instead of being copied into the cache (totk_shader_seed.h
    totk_seed_sealed). Its files are taken from there; the cache holds the rest (fill packs, pso_collected.tsv), and a
    shader's .variants lists of both places are joined. nil on the Mac, where the seed is cloned into the cache. */
@@ -112,6 +126,10 @@ static NSString *seed_dir(void) {   // the prepared startup shaders that come wi
 }
 NSString *totk_rt_dir(void) {
     static dispatch_once_t once;
+    pthread_mutex_lock(&g_rt_abi_lock);
+    totk_rt_binding_abi_freeze(&g_rt_abi);
+    BOOL discrete_v1 = g_rt_abi.discrete_v1;
+    pthread_mutex_unlock(&g_rt_abi_lock);
     // Guest threads may keep their outer pool for the whole run; release import metadata now.
     dispatch_once(&once, ^{ @autoreleasepool {
         const char *e = getenv("TOTK_SHADER_CACHE");
@@ -126,10 +144,12 @@ NSString *totk_rt_dir(void) {
         else cacheChain = [cacheChain stringByAppendingString:@"-nvn-default-depth-v1-predicated-writes"];   // development runs without a seed; the suffix names the translator semantics such caches hold
 #endif
 #if TARGET_OS_IPHONE
-        g_dir = e ? @(e) : [NSString stringWithFormat:@"shader-cache/rt-%@", cacheChain];   // in Documents (the app's working directory)
+        NSString *base = e ? @(e) : [NSString stringWithFormat:@"shader-cache/rt-%@", cacheChain];   // in Documents (the app's working directory)
 #else
-        g_dir = e ? @(e) : [root_dir() stringByAppendingFormat:@"/build/shader-cache/rt-%@", cacheChain];
+        NSString *base = e ? @(e) : [root_dir() stringByAppendingFormat:@"/build/shader-cache/rt-%@", cacheChain];
 #endif
+        g_dir = totk_rt_binding_abi_cache_directory(base, discrete_v1);
+        if (!g_dir) die("TOTK_SHADER_CACHE uses the discrete-v1 namespace while the runtime ABI is AB");
         [NSFileManager.defaultManager createDirectoryAtPath:g_dir withIntermediateDirectories:YES attributes:nil error:nil];
 #if !TARGET_OS_IPHONE
         { /* The translator that will write into this folder (start_service's program) is the one it records; a folder
@@ -170,7 +190,7 @@ NSString *totk_rt_dir(void) {
             if (runtime_boot_status) runtime_boot_status(TOTK_UI("检查着色器缓存","Checking the shader cache"),TOTK_UI("校验 App 附带的着色器，并按需导入本机缓存","Verifying the shaders bundled with the app and importing them into the local cache if needed"));
             NSString *source = seed_dir();
             totk_seed_progress = seed_progress;
-            NSDictionary *seed = totk_seed_import(source, g_dir, &error);
+            NSDictionary *seed = totk_seed_import_abi(source, g_dir, @(rt_binding_abi_name()), &error);
             totk_seed_progress = NULL;
             if ([seed[@"overlay"] isKindOfClass:NSArray.class]) {
                 g_seed_dir = source; g_seed_names = [NSSet setWithArray:seed[@"overlay"]]; g_seed_sealed = [seed[@"sealed"] boolValue];
@@ -222,10 +242,11 @@ NSString *totk_rt_dir(void) {
                           (unsigned long)mapped); }
 #if TARGET_OS_IPHONE
         // Variants that ios/tools/fill_shaders.py translated on the Mac for this device's earlier misses (shader-requests/).
-        NSDictionary *fill = totk_fill_import(@"shader-fill", g_dir);
+        NSDictionary *fill = totk_fill_import_abi(@"shader-fill", g_dir, @(rt_binding_abi_name()));
         if ([fill[@"packs"] unsignedIntegerValue]) LOG("[shader-fill] 合并 Mac 补译的着色器包 %lu 个，导入 %lu 个文件",
             (unsigned long)[fill[@"packs"] unsignedIntegerValue], (unsigned long)[fill[@"imported_files"] unsignedIntegerValue]);
         for (NSString *why in fill[@"rejected"]) LOG("【红】[shader-fill] 丢弃不完整的着色器包 %s（请在 Mac 上重新运行 fill_shaders.py）", why.UTF8String);
+        for (NSString *name in fill[@"deferred"]) LOG("[shader-fill] 暂留 %s：着色器包的绑定 ABI 与此运行时不同", name.UTF8String);
 #endif
     } });
     return g_dir;
@@ -288,7 +309,7 @@ static void service_start(rt_svc *svc) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *dm = getenv("TOTK_SHADER_DEBUGMODE");   // as the service reads it (Service.cs Run), default 1
-        if (totk_xlate_init(totk_rt_dir().fileSystemRepresentation, DMSH_CHAIN, dm && *dm ? atoi(dm) : 1))
+        if (totk_xlate_init_abi(totk_rt_dir().fileSystemRepresentation, DMSH_CHAIN, dm && *dm ? atoi(dm) : 1, rt_binding_abi_name()))
             die("shader translator (linked) could not start");
         LOG("[shader] runtime translation in the app (linked totk_xlate), cache %s", totk_rt_dir().UTF8String);
     });
@@ -316,8 +337,11 @@ static void service_start(rt_svc *svc) {
     NSString *native = xe && *xe ? @(xe) : [r stringByAppendingString:@"/build/shader-service/totk_xlate"];
     if (access(native.fileSystemRepresentation, X_OK)) die("shader translator %s is missing (make shader-service, or build the app again)", native.UTF8String);
     pid_t pid;
-    const char *argv[] = {native.UTF8String, "--service", "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String,
-                          "--chain", DMSH_CHAIN, NULL};
+    const char *argv_ab[] = {native.UTF8String, "--service", "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String,
+                             "--chain", DMSH_CHAIN, NULL};
+    const char *argv_discrete[] = {native.UTF8String, "--service", "--spirv-cross", sc.UTF8String, "--out", totk_rt_dir().UTF8String,
+                                   "--chain", DMSH_CHAIN, "--binding-abi", "discrete-v1", NULL};
+    const char *const *argv = g_rt_abi.discrete_v1 ? argv_discrete : argv_ab;
     if (posix_spawn(&pid, argv[0], &fa, &sa, (char *const *)argv, environ)) die("start shader service %s", argv[0]);
     if ((xe && *xe) || dm) LOG("[shader] translator %s, DebugMode %s", native.UTF8String, dm ? dm : "default");
     posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&sa);

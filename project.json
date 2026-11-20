@@ -124,5 +124,13 @@
     "tests": "3 seed tests, reflection regression and legacy/new native exports passed; selected AB parity and inproc/process parity reported by Luna",
     "limits": "buffer31 texture96 sampler16; geometry/capture explicitly rejected in discrete mode",
     "device_gameplay": "not tested"
+  },
+  "shader_runtime_abi": {
+    "status": "service/cache ABI isolation implemented; renderer setter not activated",
+    "default": "ab",
+    "alternate": "discrete-v1",
+    "validation": "6 cache tests, 37 seed/reflection tests reported pass; managed and iOS NativeAOT builds pass",
+    "nativeaot_archive_sha256": "ef4db6c88843c44b450596f79b0ecf2304da3bbac76c1811ab8c80313489ac5d",
+    "device_gameplay": "not tested"
   }
 }

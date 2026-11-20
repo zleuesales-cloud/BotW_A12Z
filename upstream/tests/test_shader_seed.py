@@ -524,6 +524,8 @@ class ShaderImport(unittest.TestCase):
 int main(int argc, const char **argv) { @autoreleasepool {
  NSError *error = nil; NSDictionary *r = nil;
  if (argc == 4 && !strcmp(argv[1], "--fill")) r = totk_fill_import(@(argv[2]), @(argv[3]));
+ else if (argc == 5 && !strcmp(argv[1], "--fill-abi")) r = totk_fill_import_abi(@(argv[3]), @(argv[4]), @(argv[2]));
+ else if (argc == 5 && !strcmp(argv[1], "--import-abi")) r = totk_seed_import_abi(@(argv[3]), @(argv[4]), @(argv[2]), &error);
  else if (argc == 3) r = totk_seed_import(@(argv[1]), @(argv[2]), &error);
  else return 2;
  if (!r) { fprintf(stderr, "%s\\n", error.localizedDescription.UTF8String); return 1; }
@@ -554,8 +556,10 @@ int main(int argc, const char **argv) { @autoreleasepool {
         (source/'seed-manifest.json').write_text(json.dumps(manifest))
         return source, cache, key, variant
 
-    def run_probe(self, source, cache, good=True, fill=False):
-        r = subprocess.run([str(self.binary)]+(['--fill'] if fill else [])+[str(source), str(cache)], capture_output=True, text=True)
+    def run_probe(self, source, cache, good=True, fill=False, abi=None):
+        mode = (['--fill-abi', abi] if fill and abi else ['--fill'] if fill else
+                ['--import-abi', abi] if abi else [])
+        r = subprocess.run([str(self.binary)]+mode+[str(source), str(cache)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0 if good else 1, r.stderr)
         return json.loads(r.stdout) if good else r.stderr
 
@@ -666,6 +670,59 @@ int main(int argc, const char **argv) { @autoreleasepool {
                 p.write_text(json.dumps(m))
                 self.run_probe(source, cache, good=False)
                 self.assertEqual(list(cache.iterdir()), [])
+
+    def test_seed_binding_abi_must_match_before_any_import(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, cache, _, _ = self.fixture(root)
+            manifest_path = source/'seed-manifest.json'
+            manifest = json.loads(manifest_path.read_text())
+            manifest['binding_abi'] = 'discrete-v1'
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertIn('binding ABI does not match', self.run_probe(source, cache, good=False))
+            self.assertEqual(list(cache.iterdir()), [])
+            imported = self.run_probe(source, cache, abi='discrete-v1')
+            self.assertGreater(imported['imported_files'], 0)
+            discrete_receipt = json.loads((cache/'seed-installed.json').read_text())
+            self.assertEqual(self.run_probe(source, cache, abi='discrete-v1')['imported_files'], 0)
+
+            manifest.pop('binding_abi')  # legacy metadata means AB
+            manifest_path.write_text(json.dumps(manifest))
+            self.assertIn('binding ABI does not match', self.run_probe(source, cache, good=False, abi='discrete-v1'))
+            self.assertEqual(json.loads((cache/'seed-installed.json').read_text()), discrete_receipt)
+            ab_cache = root/'ab-cache'
+            self.run_probe(source, ab_cache)
+            ab_receipt = json.loads((ab_cache/'seed-installed.json').read_text())
+            self.assertNotEqual(ab_receipt, discrete_receipt)
+            manifest['binding_abi'] = 'ab'
+            manifest_path.write_text(json.dumps(manifest))
+            explicit_ab_cache = root/'explicit-ab-cache'
+            self.run_probe(source, explicit_ab_cache)
+            self.assertEqual(json.loads((explicit_ab_cache/'seed-installed.json').read_text()), ab_receipt)
+
+    def test_fill_import_defers_valid_packs_for_the_other_binding_abi(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); source, cache, _, _ = self.fixture(root)
+            packs = root/'fills'; packs.mkdir()
+            shutil.copytree(source, packs/'legacy-ab')
+            result = self.run_probe(packs, cache, fill=True, abi='discrete-v1')
+            self.assertEqual(result['packs'], 0)
+            self.assertEqual(result['rejected'], [])
+            self.assertEqual(result['deferred'], ['legacy-ab'])
+            self.assertTrue((packs/'legacy-ab').is_dir())
+            self.assertEqual(self.run_probe(packs, cache, fill=True, abi='ab')['packs'], 1)
+            self.assertFalse((packs/'legacy-ab').exists())
+
+            manifest_path = source/'seed-manifest.json'
+            manifest = json.loads(manifest_path.read_text()); manifest['binding_abi'] = 'discrete-v1'
+            manifest_path.write_text(json.dumps(manifest))
+            shutil.copytree(source, packs/'discrete')
+            ab_cache = root/'ab-cache'; ab_cache.mkdir()
+            result = self.run_probe(packs, ab_cache, fill=True, abi='ab')
+            self.assertEqual((result['packs'], result['rejected'], result['deferred']), (0, [], ['discrete']))
+            self.assertTrue((packs/'discrete').is_dir())
+            self.assertEqual(self.run_probe(packs, ab_cache, fill=True, abi='discrete-v1')['packs'], 1)
+            self.assertFalse((packs/'discrete').exists())
 
     def test_fill_packs_merge_without_touching_the_seed_receipt(self):
         with tempfile.TemporaryDirectory() as folder:

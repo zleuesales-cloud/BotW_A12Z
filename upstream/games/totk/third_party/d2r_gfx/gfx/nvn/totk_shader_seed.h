@@ -23,8 +23,14 @@ static NSString *totk_seed_hash(NSData *data) {
 static NSString *totk_seed_fingerprint(NSDictionary *m, NSArray<NSString *> *names) {
     NSDictionary *files = m[@"files"];
     NSMutableString *s = [NSMutableString stringWithFormat:@"chain %@\nschema %@\nshaders %@\n", m[@"chain"], m[@"schema"], m[@"shaders"]];
+    if ([m[@"binding_abi"] isEqual:@"discrete-v1"]) [s appendString:@"binding_abi discrete-v1\n"];
     for (NSString *name in names) [s appendFormat:@"%@ %@\n", name, files[name]];
     return totk_seed_hash([s dataUsingEncoding:NSUTF8StringEncoding]);
+}
+
+static NSString *totk_seed_manifest_abi(NSDictionary *m) {
+    id abi = m[@"binding_abi"] ?: @"ab";
+    return [abi isKindOfClass:NSString.class] && ([abi isEqualToString:@"ab"] || [abi isEqualToString:@"discrete-v1"]) ? abi : nil;
 }
 
 // iOS checks the app bundle's seal when it installs the app and keeps the bundle read-only, so a seed inside the bundle
@@ -81,7 +87,7 @@ static BOOL totk_seed_clone_folder(NSString *source, NSString *cache, NSSet<NSSt
 // phone); set by the runtime (totk_shader_rt.m), nil in tests.
 static void (*totk_seed_progress)(int pass, NSUInteger done, NSUInteger total);
 // marker: a receipt in the cache that skips re-importing the same files; nil imports every time (fill packs).
-static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NSString *marker, NSError **error) {
+static NSDictionary *totk_seed_import_into_abi(NSString *source, NSString *cache, NSString *marker, NSString *expected_abi, NSError **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *manifestPath = [source stringByAppendingPathComponent:@"seed-manifest.json"];
     if (![fm fileExistsAtPath:manifestPath]) return @{@"available": @NO}; // development/older bundles
@@ -91,6 +97,10 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
     if (![m isKindOfClass:NSDictionary.class] || ![m[@"chain"] isEqual:@DMSH_CHAIN] ||
         ![m[@"schema"] isEqual:@1] || ![m[@"shaders"] isKindOfClass:NSNumber.class] || [m[@"shaders"] unsignedLongLongValue] == 0 ||
         ![m[@"files"] isKindOfClass:NSDictionary.class] || ![m[@"files"] count]) problem = @"Startup shader seed identity is invalid";
+    NSString *abi = [m isKindOfClass:NSDictionary.class] ? totk_seed_manifest_abi(m) : nil;
+    if (!problem && (!([expected_abi isEqualToString:@"ab"] || [expected_abi isEqualToString:@"discrete-v1"]) ||
+                     ![abi isEqualToString:expected_abi]))
+        problem = @"Startup shader seed binding ABI does not match the runtime";
     if (problem) goto fail;
     {
         NSDictionary *files = m[@"files"];
@@ -204,25 +214,37 @@ fail:
     return nil;
 }
 
+static NSDictionary *totk_seed_import_abi(NSString *source, NSString *cache, NSString *expected_abi, NSError **error);
 static NSDictionary *totk_seed_import(NSString *source, NSString *cache, NSError **error) {
-    return totk_seed_import_into(source, cache, [cache stringByAppendingPathComponent:@"seed-installed.json"], error);
+    return totk_seed_import_abi(source, cache, @"ab", error);
+}
+static NSDictionary *totk_seed_import_abi(NSString *source, NSString *cache, NSString *expected_abi, NSError **error) {
+    return totk_seed_import_into_abi(source, cache, [cache stringByAppendingPathComponent:@"seed-installed.json"], expected_abi, error);
 }
 
 // iOS has no translator: ios/tools/fill_shaders.py translates the variants a device missed and pushes them as packs
 // (directories in the seed format) under root. Each pack is checked and merged like the seed, then deleted; a rejected
 // one (an interrupted push) is deleted too, and its variants stay requested until the tool runs again.
+static NSDictionary *totk_fill_import_abi(NSString *root, NSString *cache, NSString *expected_abi);
 static NSDictionary *totk_fill_import(NSString *root, NSString *cache) {
+    return totk_fill_import_abi(root, cache, @"ab");
+}
+static NSDictionary *totk_fill_import_abi(NSString *root, NSString *cache, NSString *expected_abi) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSArray<NSString *> *packs = [[fm contentsOfDirectoryAtPath:root error:nil] ?: @[] sortedArrayUsingSelector:@selector(compare:)];
-    NSUInteger merged = 0, imported = 0; NSMutableArray<NSString *> *rejected = [NSMutableArray array];
+    NSUInteger merged = 0, imported = 0; NSMutableArray<NSString *> *rejected = [NSMutableArray array], *deferred = [NSMutableArray array];
     for (NSString *name in packs) {
         NSString *pack = [root stringByAppendingPathComponent:name]; BOOL dir = NO;
         if (![fm fileExistsAtPath:pack isDirectory:&dir] || !dir) continue;
+        NSData *raw = [NSData dataWithContentsOfFile:[pack stringByAppendingPathComponent:@"seed-manifest.json"]];
+        NSDictionary *manifest = raw ? [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil] : nil;
+        NSString *pack_abi = [manifest isKindOfClass:NSDictionary.class] ? totk_seed_manifest_abi(manifest) : nil;
+        if (pack_abi && ![pack_abi isEqualToString:expected_abi]) { [deferred addObject:name]; continue; }
         NSError *error = nil;
-        NSDictionary *r = totk_seed_import_into(pack, cache, nil, &error);
+        NSDictionary *r = totk_seed_import_into_abi(pack, cache, nil, expected_abi, &error);
         if (r && [r[@"available"] boolValue]) { merged++; imported += [r[@"imported_files"] unsignedIntegerValue]; }
         else [rejected addObject:[NSString stringWithFormat:@"%@: %@", name, error ? error.localizedDescription : @"no manifest"]];
         [fm removeItemAtPath:pack error:nil];
     }
-    return @{@"packs": @(merged), @"imported_files": @(imported), @"rejected": rejected};
+    return @{@"packs": @(merged), @"imported_files": @(imported), @"rejected": rejected, @"deferred": deferred};
 }

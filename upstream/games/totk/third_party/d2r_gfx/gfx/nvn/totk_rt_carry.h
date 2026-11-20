@@ -12,6 +12,39 @@
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 
+enum { TOTK_RT_ABI_OK = 0, TOTK_RT_ABI_INVALID = 1, TOTK_RT_ABI_FROZEN = 2 };
+typedef struct { BOOL discrete_v1, frozen; } totk_rt_binding_abi_state;
+
+__attribute__((unused)) static int totk_rt_binding_abi_select(totk_rt_binding_abi_state *state, NSString *abi) {
+    if ([abi isEqualToString:@"ab"]) {
+        if (state->frozen) return state->discrete_v1 ? TOTK_RT_ABI_FROZEN : TOTK_RT_ABI_OK;
+        state->discrete_v1 = NO; return TOTK_RT_ABI_OK;
+    }
+    if ([abi isEqualToString:@"discrete-v1"]) {
+        if (state->frozen) return state->discrete_v1 ? TOTK_RT_ABI_OK : TOTK_RT_ABI_FROZEN;
+        state->discrete_v1 = YES; return TOTK_RT_ABI_OK;
+    }
+    return TOTK_RT_ABI_INVALID;
+}
+__attribute__((unused)) static void totk_rt_binding_abi_freeze(totk_rt_binding_abi_state *state) { state->frozen = YES; }
+
+__attribute__((unused)) static BOOL totk_rt_binding_abi_path_is_discrete(NSString *path) {
+    NSString *name = path.lastPathComponent;
+    return [name hasSuffix:@".discrete-v1"] || [name containsString:@".discrete-v1-retired-"];
+}
+__attribute__((unused)) static BOOL totk_rt_binding_abi_active_path_is_discrete(NSString *path) {
+    return [path.lastPathComponent hasSuffix:@".discrete-v1"];
+}
+__attribute__((unused)) static BOOL totk_rt_binding_abi_paths_match(NSString *a, NSString *b) {
+    return totk_rt_binding_abi_active_path_is_discrete(a) == totk_rt_binding_abi_path_is_discrete(b);
+}
+__attribute__((unused)) static NSString *totk_rt_binding_abi_cache_directory(NSString *root, BOOL discrete_v1) {
+    if (!root.length) return nil;
+    BOOL named_discrete = totk_rt_binding_abi_active_path_is_discrete(root);
+    if (discrete_v1) return named_discrete ? root : [root stringByAppendingString:@".discrete-v1"];
+    return totk_rt_binding_abi_path_is_discrete(root) ? nil : root;
+}
+
 /* The other rt-* folders beside `dir` (earlier chains and contexts, and folders another translator wrote, set aside as
    <dir>-retired-...), the most recently changed first: where the variants a carried collected list names still have their
    indexes (.variants, with the deps a row is put on the app's variants by; totk_shader_rt.m totk_rt_row_prefer_seed).
@@ -26,6 +59,7 @@ __attribute__((unused)) static NSArray<NSString *> *totk_rt_siblings(NSString *d
     for (NSString *name in [fm contentsOfDirectoryAtPath:parent.length ? parent : @"." error:nil] ?: @[]) {
         if (![name hasPrefix:@"rt-"] || [name isEqualToString:own]) continue;
         NSString *path = [parent stringByAppendingPathComponent:name];
+        if (!totk_rt_binding_abi_paths_match(dir, path)) continue;
         BOOL isDir = NO; if (![fm fileExistsAtPath:path isDirectory:&isDir] || !isDir) continue;
         NSDate *when = [fm attributesOfItemAtPath:path error:nil].fileModificationDate ?: NSDate.distantPast;
         [found addObject:@[when, path]];
@@ -49,6 +83,8 @@ static NSArray<NSString *> *totk_rt_carry_over(NSString *dir) {
         NSString *best = nil; NSDate *latest = nil;
         for (NSString *name in [fm contentsOfDirectoryAtPath:parent.length ? parent : @"." error:nil] ?: @[]) {
             if (![name hasPrefix:@"rt-"] || [name isEqualToString:own]) continue;
+            NSString *sibling = [parent stringByAppendingPathComponent:name];
+            if (!totk_rt_binding_abi_paths_match(dir, sibling)) continue;
             NSString *from = [[parent stringByAppendingPathComponent:name] stringByAppendingPathComponent:item];
             NSDate *when = [fm attributesOfItemAtPath:from error:nil].fileModificationDate;
             if (when && (!latest || [when compare:latest] == NSOrderedDescending)) { best = from; latest = when; }
