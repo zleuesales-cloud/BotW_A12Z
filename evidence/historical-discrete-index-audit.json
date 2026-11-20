@@ -1,0 +1,14 @@
+{
+  "entries": 6969,
+  "stages": {
+    "ps": 3489,
+    "vs": 3335,
+    "cs": 145
+  },
+  "max_slots": {
+    "buffers": 29,
+    "textures": 18,
+    "samplers": 15
+  },
+  "over_limits": []
+}

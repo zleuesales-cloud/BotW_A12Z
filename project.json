@@ -30,5 +30,24 @@
     "Historical Apple5 log skips NVN opcodes 2,29,30,31; cannot be used as complete renderer.",
     "Traditional Metal candidate maps MTL4 objects through m3_compat; Tier 1 resource binding requires separate audit.",
     "Historical App has launched successfully; no gameplay or picture correctness established."
-  ]
+  ],
+  "runtime_checks": [
+    {
+      "script": "verify_realtime_patch.py",
+      "exit_code": 0
+    },
+    {
+      "script": "verify_pad_repeat_patch.py",
+      "exit_code": 0
+    }
+  ],
+  "traditional_metal_candidate_rejected_reasons": [
+    "No GAME_BOTW190 or game_patches_botw.c support in pinned candidate.",
+    "encode_args writes raw resource IDs/GPU addresses into argument blocks, unsuitable for Tier 1."
+  ],
+  "runtime_candidate": "ly05010419/MacNativeGames@f770289b5d006a539b58698c88e41b80d8116e56",
+  "verification_tools": {
+    "unicorn": "2.1.4",
+    "capstone": "5.0.7"
+  }
 }
