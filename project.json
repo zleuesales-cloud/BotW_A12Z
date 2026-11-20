@@ -138,5 +138,11 @@
     "validation": "6 cache tests, 37 seed/reflection tests reported pass; managed and iOS NativeAOT builds pass",
     "nativeaot_archive_sha256": "ef4db6c88843c44b450596f79b0ecf2304da3bbac76c1811ab8c80313489ac5d",
     "device_gameplay": "not tested"
+  },
+  "virtual_pool_mapping": {
+    "status": "checked mapping metadata implemented; canonical Metal resource lookup not yet integrated",
+    "validation": "CPU mapping test passed, including 600 mappings, partial overlap/unmap, adjacent virtual pools, finalize/address reuse and overflow; parent reran; independent Luna review passed for default synchronous mode",
+    "configuration": "sync replay required for production lookup; Apple5 async rejection must accompany native activation",
+    "gpu_alias_chain": "still failing with distinct no-copy buffer wrappers; canonicalization pending"
   }
 }

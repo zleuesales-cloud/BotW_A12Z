@@ -1,0 +1,12 @@
+Virtual pool mapping metadata checkpoint
+Implementer: lunna_max; independent review: lunna_shader_audit (requested GPT-6 Luna, max).
+Replaced fixed 512-entry diagnostic map with checked dynamic owner-aware mapping intervals.
+Allocation capacity reserved before VM mutation; partial remap/unmap splits intervals; merge cannot cross virtual owners.
+Finalize removes virtual entries and physical reverse references, including CPU-visible physical storage.
+MapVirtual and full Finalize transactions now hold existing replay section.
+Validation: python3 -m unittest upstream.tests.test_vpool_mapping_table -v, PASS (parent rerun).
+Covers 600 mappings, partial remap/unmap, noncontiguous spans, adjacent virtual pools, overflow, address reuse and physical teardown.
+Executor reports Mac vpool and iOS/A12 vpool+hle object compilation passed.
+Scope: default synchronous replay; experimental async mode provides drain, not exclusivity, and must be rejected before Apple5 native activation.
+No canonical Metal buffer lookup enabled here. Distinct no-copy-wrapper GPU alias chain remains failing pending canonicalization.
+No iPad gameplay validation.

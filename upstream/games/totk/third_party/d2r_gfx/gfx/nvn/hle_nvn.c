@@ -295,12 +295,14 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
 }
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     pool_t *o = (pool_t *)p;
+    replay_enter();
     totk_prompt_remove_pool(o->mem, (size_t)o->size);
     /* The same condition nvnMemoryPoolInitialize registered the pool under: an empty pool (size 0) was given no
        buffer and no dirty range, so its teardown is a no-op — a removal by address could otherwise hit a live
        neighbour's range when the game's allocator handed the empty pool an address next to one (#1367). */
-    if (o->mem && o->size && !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS)) { replay_enter(); nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); replay_leave(); }
+    if (o->mem && o->size && !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS)) { nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); }
     mtl_pool_forget_address(o); totk_vpool_fini(o); o->magic = 0;
+    replay_leave();
 }
 /* A mirrored render target has private Metal storage. Reconcile GPU writes at mapped-range cache maintenance too:
    BotW flushes its grass masks before reading their pool bytes. The write-back helper keeps later CPU writes and
@@ -316,7 +318,10 @@ NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p){const pool_t *v=(const voi
 #endif
  if(v->magic!=MAGIC('P','O','O','L'))return NULL;return (v->flags&NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)?NULL:v->mem;}
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *r) {
-    return (NVNboolean)totk_vpool_map((pool_t *)p, n, (const totk_mapping_request *)(const void *)r);
+    replay_enter();
+    NVNboolean result = (NVNboolean)totk_vpool_map((pool_t *)p, n, (const totk_mapping_request *)(const void *)r);
+    replay_leave();
+    return result;
 }
 static _Atomic int g_pool_issue_once=-1,g_pool_issue_stats;
 static _Atomic uint64_t g_pool_issue_calls,g_pool_issue_skips,g_pool_issue_marks;
