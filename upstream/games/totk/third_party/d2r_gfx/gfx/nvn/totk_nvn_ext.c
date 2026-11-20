@@ -4,6 +4,7 @@
 #include "../../host/hle.h"
 #include "nvn_impl.h"
 #include "nvn_obj.h"
+#include "nvn_mtl.h"
 #include "nvn_tex.h"
 #include <string.h>
 #include <time.h>
@@ -74,7 +75,10 @@ NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; 
 NVN(nvnTextureGetSwizzle, void, const NVNtexture *t, NVNtextureSwizzle *r, NVNtextureSwizzle *g, NVNtextureSwizzle *b, NVNtextureSwizzle *a) { get_swizzle(&CTX(t)->d, r, g, b, a); }
 NVN(nvnTextureGetDepthStencilMode, NVNtextureDepthStencilMode, const NVNtexture *t) { (void)t; return NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH; }
 NVN(nvnTextureGetStride, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->d.stride; }
-NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { return (NVNtextureAddress)(uintptr_t)CTX(t)->mem; }
+NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) {
+    const tex_t *o=CTX(t);if(o->pool)mtl_pool_addressed(o->pool,o->pool->mem,o->pool->size);
+    return (NVNtextureAddress)(uintptr_t)o->mem;
+}
 NVN_NOPROTO(nvnTextureGetMemoryPool, const NVNmemoryPool *, const NVNtexture *t) { return (const NVNmemoryPool *)(const void *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
 NVN(nvnTextureGetDebugID, uint64_t, const NVNtexture *t) { return CTX(t)->serial; }
@@ -103,8 +107,11 @@ NVN(nvnTextureViewSetSwizzle, void, NVNtextureView *v, NVNtextureSwizzle r, NVNt
     if ((unsigned)r > 5 || (unsigned)g > 5 || (unsigned)b > 5 || (unsigned)a > 5) die("invalid NVN texture view swizzle");
     VW(v)->set_swizzle = 1; VW(v)->swz[0] = (uint8_t)r; VW(v)->swz[1] = (uint8_t)g; VW(v)->swz[2] = (uint8_t)b; VW(v)->swz[3] = (uint8_t)a;
 }
-// Only depth-plane sampling is implemented (same restriction as the texture builder).
-NVN(nvnTextureViewSetDepthStencilMode, void, NVNtextureView *v, NVNtextureDepthStencilMode m) { (void)v; if (m != NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH) die("stencil-plane texture view sampling is not implemented"); }
+// The depth plane, or the stencil plane (a Metal view in X32_Stencil8 / X24_Stencil8, nvn_mtl.m; Pokemon Pokopia samples it).
+NVN(nvnTextureViewSetDepthStencilMode, void, NVNtextureView *v, NVNtextureDepthStencilMode m) {
+    if (m != NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH && m != NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL) die("invalid NVN depth / stencil sampling mode %d", (int)m);
+    VW(v)->stencil = m == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL;
+}
 NVN(nvnTextureViewGetLevels, NVNboolean, const NVNtextureView *v, int *base, int *n) { *base = CVW(v)->base_level; *n = CVW(v)->nlevels; return CVW(v)->set_levels; }
 NVN(nvnTextureViewGetFormat, NVNboolean, const NVNtextureView *v, NVNformat *f) { *f = (NVNformat)CVW(v)->format; return CVW(v)->set_format; }
 NVN(nvnTextureViewGetTarget, NVNboolean, const NVNtextureView *v, NVNtextureTarget *t) { *t = (NVNtextureTarget)CVW(v)->target; return CVW(v)->set_target; }

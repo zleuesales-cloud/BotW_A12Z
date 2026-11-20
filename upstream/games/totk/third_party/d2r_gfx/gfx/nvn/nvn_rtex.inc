@@ -73,19 +73,19 @@ static int rx_setup(MTLPixelFormat fc, MTLPixelFormat fds) {
     if (getenv("DM_RT_TEST_NOPSO")) return 0;   // 测试：当作这台设备建不出外推管线（验整局退回原画法） | Test: pretend this device cannot build the extrapolation pipeline (verifies the whole run falls back to the original drawing method)
     if (g_rx_pso1 && g_rx_fmt_c == fc && g_rx_fmt_ds == fds) return 1;
     static int failed; if (failed) return 0;
-    NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_rx_msl) options:nil error:&e];
+    NSError *e = nil; id<MTLLibrary> lib = mtl_counted_library(g_dev, @(k_rx_msl), nil, &e);
     if (!lib) { MLOG("【红】运行时外推：着色器编译失败 %s", e.localizedDescription.UTF8String); failed = 1; return 0; }
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = [lib newFunctionWithName:@"rx_vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"rx_fs1"];
     pd.colorAttachments[0].pixelFormat = fc; pd.depthAttachmentPixelFormat = fds;
     if (fds == MTLPixelFormatDepth32Float_Stencil8) pd.stencilAttachmentPixelFormat = fds;
-    g_rx_pso1 = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+    g_rx_pso1 = mtl_counted_render(g_dev, pd, &e);
     if (!g_rx_pso1) { MLOG("【红】运行时外推：管线建不出 %s", e.localizedDescription.UTF8String); g_rx_pso1 = nil; failed = 1; return 0; }
     MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES;
     if (fds == MTLPixelFormatDepth32Float_Stencil8) { MTLStencilDescriptor *sd = [MTLStencilDescriptor new]; sd.stencilCompareFunction = MTLCompareFunctionEqual; sd.readMask = 0x2; sd.writeMask = 0x80; sd.depthStencilPassOperation = MTLStencilOperationReplace;   // 洞 / 屏外新进来的像素由片元导出 0x80，后面 LDR 区域据此重算   // 本帧被界面挡住的像素（界面模板趟已写 0x2）不算 | Hole pixels / pixels newly entering from off-screen get 0x80 exported by the fragment, and the later LDR region is recomputed accordingly   // Pixels covered by this frame's UI (the UI stencil pass already wrote 0x2) do not count
         dd.frontFaceStencil = sd; dd.backFaceStencil = sd; }
     g_rx_dss = [g_dev newDepthStencilStateWithDescriptor:dd];
     if (!g_rx_args) { MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 3; ad.maxBufferBindCount = 1;
-        g_rx_args = [M3ArgTable new];
+        g_rx_args = [g_dev newArgumentTableWithDescriptor:ad error:&e];
         for (int i = 0; i < 3; i++) { g_rx_const[i] = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(g_rx_const[i]); } }
     if (!g_rx_args || !g_rx_dss) { MLOG("【红】运行时外推：参数表 / 深度状态建不出"); g_rx_pso1 = nil; failed = 1; return 0; }
     g_rx_fmt_c = fc; g_rx_fmt_ds = fds; MLOG("运行时外推：着色器建好（颜色格式 %lu，深度格式 %lu）", (unsigned long)fc, (unsigned long)fds);
@@ -148,9 +148,9 @@ int rt_ex_encode(id<MTLTexture> dst_hdr, id<MTLTexture> dst_ds, id<MTLTexture> s
     rp.depthAttachment.texture = dst_ds; rp.depthAttachment.loadAction = MTLLoadActionLoad; rp.depthAttachment.storeAction = MTLStoreActionStore;
     if (dst_ds.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { rp.stencilAttachment.texture = dst_ds; rp.stencilAttachment.loadAction = MTLLoadActionLoad; rp.stencilAttachment.storeAction = MTLStoreActionStore; }
     id<MTL4RenderCommandEncoder> en = [g_cb renderCommandEncoderWithDescriptor:rp]; if (!en) return 0;
-    ((void)0);
-    m3_attach(g_rx_args, en, M3_STAGE_FRAGMENT);
-    [g_rx_args setTexture:src_hdr atIndex:0]; [g_rx_args setTexture:src_ds atIndex:1]; [g_rx_args setTexture:g_rx_stv atIndex:2];
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:g_rx_args atStages:MTLRenderStageFragment];
+    [g_rx_args setTexture:src_hdr.gpuResourceID atIndex:0]; [g_rx_args setTexture:src_ds.gpuResourceID atIndex:1]; [g_rx_args setTexture:g_rx_stv.gpuResourceID atIndex:2];
     [g_rx_args setAddress:cbuf.gpuAddress atIndex:0];
     [en setViewport:(MTLViewport){0, 0, W, H, 0, 1}]; [en setRenderPipelineState:g_rx_pso1]; [en setDepthStencilState:g_rx_dss]; [en setStencilReferenceValue:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; m4_end(en);

@@ -9,8 +9,21 @@ typedef struct {
     uint8_t lmap[8]; const void *fsfn;
 } pso_key;
 // pso_key.a2c: bit 0 alpha-to-coverage; bit 1 (TOTK) layered pass, the vertex function writes the render target array index;
-// bits 2-3 (TOTK_MFX) MetalFX copy role of the draw: 1 scene to attachment 6, 2 / 3 UI (blended / opaque) to attachment 7.
+// bits 2-3 (TOTK_MFX) MetalFX copy role of the draw: 1 scene to attachment 6, 2 / 3 UI (blended / opaque) to attachment 7;
+// bit 4 (TOTK) the vertex function emulates a sampler border colour Metal lacks (vs_fn_for, border_key).
 #define PSO_LAYERED 2u
+#define PSO_VBORDER 16u
+// bit 5 (TOTK, PR #1129): HDR / EDR on for this draw; the fragment function is the shader's HDR twin (NvShader hdr_fn).
+#define PSO_HDR 32u
+/* A host-generated full-viewport vertex function (Labo's lens-free compositor).
+ * Separate cache identity from the original vertex-input pipeline. */
+#define PSO_HOST_RECT 64u
+#define PSO_HOST_OUTPUT 128u   /* Plain native SBS output; no Labo lens fragment. */
+/* The host bits: such a pipeline is built in play from a host function and never archived (pso_archive_key), so a listed
+   row is never one: a row with them comes from a runtime where the bits meant nothing (Ocarina of Time's list holds 69,
+   recorded 2026-11-09) or from a VR session. pso_skey_parse refuses it, as building it would ask for the VR host function
+   (2026-11-13, the shared layer's first OOT pipeline archive stopped with "Labo VR vertex function is unavailable"). */
+#define PSO_HOST_BITS (PSO_HOST_RECT | PSO_HOST_OUTPUT)
 
 typedef struct {
     uint8_t kind, fbmask;
@@ -20,6 +33,18 @@ typedef struct {
 // Runtime-translated TOTK variant keys are up to 79 bytes (SHA-256 plus answer hash and _b).
 // The old 24-byte fields silently truncated them and made recorded render PSOs impossible to warm.
 typedef struct { char vs[80], fs[80]; uint8_t vs_stage, fs_stage, merged, fz; pso_fz_desc fz_desc; pso_key k; } pso_skey;
+
+/* State a pipeline does not use is cleared, so one pipeline has one key: a target's blend factors when it does not blend,
+   and (outside a merged pass, whose blend / mask index logical targets through lmap) the write mask and blend bit of a
+   colour target the pass does not have. These keep whatever earlier draws left: in a profile's warm list 35% of the
+   render pipelines (8,479 of 24,146) differed only so, each compiled again, and every start met "new" ones in the same
+   scene (2026-10-22). pso_key_fill makes keys so, pso_skey_parse reads recorded ones so. */
+static inline void pso_key_norm(pso_key *k, int merged) {
+    for (int i = 0; i < 8; i++) {
+        if (!merged && !k->cfmt[i]) { k->blend_en &= ~(1u << i); k->chmask &= ~(0xfu << (4 * i)); }
+        if (!(k->blend_en >> i & 1)) memset(&k->blend[i], 0, sizeof k->blend[i]);
+    }
+}
 
 static inline void pso_skey_from(const pso_key *k, NvShader *vs, NvShader *fs, int merged, const pso_fz_desc *fz, pso_skey *out) {
     memset(out, 0, sizeof *out);
@@ -49,5 +74,7 @@ static inline int pso_skey_parse(const char *hex, pso_skey *out) {
         if (a < 0 || b < 0) return -1;
         p[i / 2] = (uint8_t)(a << 4 | b);
     }
+    if (out->k.a2c & PSO_HOST_BITS) return -1;   // never a listed pipeline (PSO_HOST_BITS)
+    pso_key_norm(&out->k, out->merged);   // also rows recorded before keys were made so
     return 0;
 }

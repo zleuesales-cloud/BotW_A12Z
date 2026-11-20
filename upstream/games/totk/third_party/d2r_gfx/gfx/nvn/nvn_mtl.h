@@ -5,6 +5,8 @@
 // Ordering convention (to avoid repeating the GO_MAP_SHARE corrupted-picture mistake of the x86 route): every visible effect of "GPU completion" (sync object ready, event values, counters)
 // happens only after the Metal command buffer has actually completed; CPU-side waits look only at the completed value of the MTLSharedEvent.
 #pragma once
+int mtl_probe_writeback(void);
+int mtl_probe_memory_demand(void);
 #include <stdint.h>
 #include <stddef.h>
 
@@ -15,6 +17,10 @@ void bf_want_note(const char *key);
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_del(const void *mem);
+// Issued GPU addresses belong to the NVN pool lifetime, not its replaceable Metal wrapper.
+void mtl_pool_addressed(const void *owner, const void *mem, uint64_t size);
+void mtl_pool_forget_address(const void *owner);
+void mtl_pool_code_address(const void *mem, uint64_t size);   // a shader-code pool's own address: kept out of the raw pool table
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 成功 1；buf 是 (__bridge) id<MTLBuffer> | 1 on success; buf is a (__bridge) id<MTLBuffer>
 
 typedef struct {
@@ -40,8 +46,12 @@ void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // 完�
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // 完成后写计数器记录 | Write the counter record after completion
 uint64_t mtl_sub_commit(void);
 int mtl_probe_vertex_streams(void);
+int mtl_probe_vertex_input_types(void);
+int mtl_probe_fragment_output_types(void);
+int mtl_probe_pipeline_archive(void);
 int mtl_probe_arg_epoch(void);
 int mtl_probe_tex_slots(void);
+int mtl_probe_sampler_border(void);
 int mtl_probe_pool_retire(void);
 int mtl_probe_anomaly(void);
 int mtl_probe_widen(void);     // TOTK: standalone probes of isolated GPU paths (die on mismatch, return checked count)
@@ -49,21 +59,27 @@ int mtl_probe_blockrt(void);
 int mtl_probe_midclear(void);
 int mtl_probe_srgb_view(void);
 int mtl_probe_storage_view(void);
+int mtl_probe_stor_alias(void);
+int mtl_probe_arena_trim(void);
 int mtl_probe_compressed_alias(void);
 int mtl_probe_linear_rt_upload(void);
+int mtl_probe_texels_region(void);
 int mtl_probe_texture_retire(void);
 int mtl_probe_ds_clear(void);
 int mtl_probe_ub_rename(void);
 int mtl_probe_ubo_snapshot(void);
 int mtl_probe_drv_c0(void);
 int mtl_probe_dispatch_chain(void);
+int mtl_probe_copy_alias(void);
 int mtl_probe_layer_merge(void);
 int mtl_probe_cube_merge(void);
 void mtl_cube_merge_stats(uint64_t v[4]);
 int mtl_probe_winding(void);
+int mtl_probe_draw_barriers(void);
 int mtl_probe_depth_output(void);
 int mtl_probe_tile(void);
 
+void mtl_noread_mark_frame(void);                    // OOT_NOREAD_PROBE: at the present, make the pages the GPU may have written this frame inaccessible (CPU reads of GPU results get recorded)
 uint64_t mtl_last_fence(void);                       // 最近一次提交的栅栏值（0 = 从未提交） | Fence value of the most recent submit (0 = never submitted)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // GPU 完成到 fence 返回 1，超时 0 | Returns 1 when the GPU has completed up to fence, 0 on timeout
 void mtl_finish(void);                               // 等所有已提交的命令完成 | Wait for all submitted commands to complete
@@ -73,3 +89,11 @@ void mtl_ui_ghost(int on, float px, float py, const float grid[4], float cx, flo
 int mtl_ui_ghost_rect(float r[4]);   // 上面认到的那件货的屏幕矩形（归一化）；还没认到返回 0 | Screen rectangle (normalized) of the item recognized above; returns 0 if not recognized yet
 
 int mtl_probe_upload_batch(void);
+
+int mtl_probe_visibility(void); /* Count / clear / resume / reset in one encoder. */
+
+int mtl_probe_vr_ui_layout(void); /* Native UI square-pixel and scissor GPU readback. */
+int mtl_probe_f2ip(void);
+int mtl_probe_mesh(void);
+int mtl_probe_mesh_batch(void);
+int mtl_probe_sured(void);

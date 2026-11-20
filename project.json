@@ -1,5 +1,5 @@
 {
-  "status": "traditional Metal source imported for compile audit; not A12Z validated",
+  "status": "BotW-capable upstream imported; A12Z GPU port incomplete",
   "target": {
     "model": "iPad8,9",
     "game": "BOTW 1.9.0 + DLC",
@@ -49,5 +49,11 @@
   "verification_tools": {
     "unicorn": "2.1.4",
     "capstone": "5.0.7"
+  },
+  "source_base": {
+    "repository": "https://github.com/ly05010419/MacNativeGames",
+    "commit": "f770289b5d006a539b58698c88e41b80d8116e56",
+    "scope": "games/totk, games/botw, root build entry and licenses",
+    "validation": "runtime patch checks only; not A12Z graphics validated"
   }
 }
