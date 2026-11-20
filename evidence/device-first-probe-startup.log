@@ -1,0 +1,18 @@
+[totk] settings: 17 defaults from /var/containers/Bundle/Application/8B817E59-F10E-4AB6-8264-AC0AE807667E/TOTK.app/Settings.bundle/Root.plist
+[totk] picture: the old settings are now the custom profile (docked, scene 1600x900, taa 0, 30 fps, metalfx off)
+[totk] settings: picture profile (handed over at game start); drawable default, scene default, hz -, phone -, overlays 1/1, taa 0, mfx 1/0
+[totk] view drawable 1280x894 (screen scale 2.0, TOTK_IOS_DRAWABLE_H=720)
+[dm] [nvn-mtl] [hud] 安全区：两侧 0 像素、底部 23 像素（画布 1280x894），角上的提示框避开它
+[totk] picture: profile custom, metalfx off; docked, scene 1600x900, taa 0, 30 fps, Switch size 0, drawable 1080
+[totk] phone frame rate: held at 30
+[totk] view drawable 1920x1341 (screen scale 2.0, TOTK_IOS_DRAWABLE_H=1080)
+[dm] [nvn-mtl] [hud] 安全区：两侧 0 像素、底部 35 像素（画布 1920x1341），角上的提示框避开它
+[totk-audio] audio session category=AVAudioSessionCategoryPlayback active=1 route=Speaker err=none
+[totk] game tables /private/var/containers/Bundle/Application/8B817E59-F10E-4AB6-8264-AC0AE807667E/TOTK.app/GameData/game-data/runtime-tables.bin: 3 modules, main 225615 subsdk0 19073 sdk 34059 relocations
+[totk] mapped embedded main at 0x122944000 size=34258944 symbols=510
+[totk] mapped embedded subsdk0 at 0x1249f0000 size=7159808 symbols=10111
+[totk] mapped embedded sdk at 0x1250c4000 size=14417920 symbols=23066
+[botw] 1.9.0 game-code patches
+[botw] docked render size 1600x900 into the 1920x1080 canvas (custom; TOTK_RENDER_RES)
+[botw] handheld render size main+0x1266114: embedded d2a89408, expected patched d0007208
+[totk] FAIL: embedded main text was not patched at build time (ios/tools/build_ipa.py export-ios)

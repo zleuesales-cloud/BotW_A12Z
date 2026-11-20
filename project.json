@@ -194,6 +194,7 @@
     "bundle_id": "org.macnativegames.botw.a12z",
     "source_commit": "a8982c1",
     "device": "00008027-001C51D12262402E",
-    "gpu_validation": "no pass result yet"
+    "gpu_validation": "no pass result yet",
+    "first_failure": "runtime startup patch validation: embedded main+0x1266114 d2a89408, expected exported d0007208; running tables/modules loaded; re-export/relink pending"
   }
 }
