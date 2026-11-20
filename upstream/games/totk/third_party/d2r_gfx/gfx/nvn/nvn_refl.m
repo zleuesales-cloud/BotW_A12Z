@@ -33,15 +33,26 @@ static int refl_rw(NSDictionary *b) {
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     #define FAIL(...) do { free(o->c1); o->c1 = NULL; o->c1_len = 0; o->has_c1 = 0; snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
+    if (![j isKindOfClass:[NSDictionary class]]) FAIL("reflection must be an object");
+    // Legacy caches omit bind_model; discrete layouts must never enter the raw argument-block path.
+    id model = j[@"bind_model"];
+    if (model && ![model isEqual:@"ab"]) FAIL("unsupported binding ABI: %s", [[model description] UTF8String]);
     if (![j[@"route"] isEqual:@"B"]) FAIL("不是 B 反射（route ≠ B；A 路线 / PC 链反射已退役）");
     {   // Switch 原版翻译：种类与 NVN 槽号已由 dmsh_build.py 从 MSL 成员名解出 | Translated original Switch shaders: kind and NVN slot number are already parsed from the MSL member names by dmsh_build.py
         NSArray *bs = j[@"bindings"];
         if (![bs isKindOfClass:[NSArray class]]) FAIL("缺 bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("绑定 %lu 个，超上限 %d", (unsigned long)bs.count, NVN_REFL_MAXB);
         o->route_b = 1; o->abi = 0;   // spirv-cross 第 0 组 → [[buffer(0)]] | spirv-cross set 0 → [[buffer(0)]]
+        uint8_t seen[NVN_REFL_MAXB] = {0};
         for (NSDictionary *b in bs) {
+            if (![b isKindOfClass:[NSDictionary class]]) FAIL("binding must be an object");
+            id arg = b[@"arg_id"];
+            if (![arg isKindOfClass:[NSNumber class]] || [arg doubleValue] < 0 ||
+                [arg doubleValue] >= NVN_REFL_MAXB || [arg doubleValue] != [arg intValue])
+                FAIL("invalid argument ID: %s", [[arg description] UTF8String]);
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
+            if (seen[aid]++) FAIL("duplicate argument ID %d", aid);
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             if ([k isEqualToString:@"cbuf"]) r->kind = NVN_RB_CBUF;
             else if ([k isEqualToString:@"samp"]) r->kind = NVN_RB_SAMP;

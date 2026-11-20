@@ -1,0 +1,3 @@
+Production nvn_refl.m compiled and exercised by tests/test_binding_abi.py: PASS
+Existing BotW seed: checked=15525 failed=0
+No GPU execution or picture validation in this check.

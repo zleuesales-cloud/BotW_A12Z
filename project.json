@@ -57,5 +57,16 @@
     "validation": "runtime patch checks only; not A12Z graphics validated",
     "archive_sha256": "f652d6f38994ad1c7f7dd4ac868901a991a6fa415311514c26305867df7d6f50"
   },
-  "runtime_checks_source": "pinned upstream scripts; both passed"
+  "runtime_checks_source": "pinned upstream scripts; both passed",
+  "binding_validation": {
+    "unit_test": "upstream/tests/test_binding_abi.py",
+    "result": "pass",
+    "existing_botw_reflections_checked": 15525,
+    "existing_botw_reflections_failed": 0,
+    "supported_binding_models": [
+      "legacy omitted",
+      "ab"
+    ],
+    "discrete_binding": "rejected explicitly until the matching binding path is implemented"
+  }
 }
