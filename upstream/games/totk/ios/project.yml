@@ -88,4 +88,4 @@ targets:
         - ../third_party/d2r_gfx/gfx/nvn/include
         - Gen
         - Gen/deps/include
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15 -I../runtime -I../third_party/d2r_gfx/gfx/nvn -I../third_party/d2r_gfx/gfx/nvn/include -IGen -I../build
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-a12 -I../runtime -I../third_party/d2r_gfx/gfx/nvn -I../third_party/d2r_gfx/gfx/nvn/include -IGen -I../build
