@@ -1,0 +1,4 @@
+Classic Metal fill/readback, callback order, immutable snapshot, nil/repeated submission rejection: PASS on Mac GPU.
+Feedback temporary lifetime: PASS; no-pool negative control failed as expected.
+Production nvn_mtl.m and nvn_completion.m compiled to iOS 26 arm64 apple-a12 objects. Existing renderer warnings remain.
+Not a full App link, iPad GPU run, or game-picture validation. Upstream no-submit guard retained.

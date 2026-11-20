@@ -39,7 +39,7 @@ static void dp_time_finish(TotkCommitOptions *options, uint64_t fence) {
     int count = g_dp_count; dp_time *records = malloc(count * sizeof *records); memcpy(records, g_dp_times, count * sizeof *records);
     id<MTL4CounterHeap> heap = g_dp_heap; id<MTLBuffer> grids = g_dp_grids; double hz = (double)[g_dev queryTimestampFrequency];
     g_dp_count = 0; g_dp_heap = nil; g_dp_grids = nil;
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+    [options addFeedbackHandler:^(nvn_gpu_result feedback) {
         NSData *data = [heap resolveCounterRange:NSMakeRange(0, count * 2)];
         if (feedback.error || data.length != count * 2 * sizeof(MTL4TimestampHeapEntry) || hz <= 0) {
             MLOG("[dispatch-gpu] invalid GPU feedback/counters at submit %llu", (unsigned long long)fence); free(records); return;

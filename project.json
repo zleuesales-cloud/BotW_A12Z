@@ -68,5 +68,16 @@
       "ab"
     ],
     "discrete_binding": "rejected explicitly until the matching binding path is implemented"
+  },
+  "gpu_submission": {
+    "status": "shared completion and classic submission integrated; game command creation and encoders not migrated",
+    "tests": {
+      "classic_gpu_fill_readback": "pass on Mac; not an iPad gameplay test",
+      "callback_snapshot_order_and_rejection": "pass",
+      "temporary_readback_lifetime": "pass with failing negative control",
+      "ios_a12_objects": "nvn_mtl.m and nvn_completion.m compiled"
+    },
+    "upstream_submission_guard": "upstream defaults to no game GPU submission after documented driver panics; retained, not used as successful GPU execution",
+    "installed_mac_provenance_commit": "7a158084c306e8ea348a95c5cefe029b9bb03690"
   }
 }

@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import "nvn_completion.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,7 @@ int main(void) { @autoreleasepool {
         [queue signalEvent:event value:1];
         require([event waitUntilSignaledValue:1 timeoutMS:10000], "GPU producer completes");
         void *owned=(void *)CFBridgingRetain(buffer);
-        [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        [options addFeedbackHandler:^(nvn_gpu_result feedback) {
             (void)feedback;
             const uint8_t *bytes=((__bridge id<MTLBuffer>)owned).contents;
             for (unsigned i=0;i<4096;i++) require(bytes[i]==0x5a, "completion reads GPU-written bytes");
@@ -43,8 +44,7 @@ int main(void) { @autoreleasepool {
     }
     require(alive(&weakBuffer), "explicit completion ownership protects readback");
     // The caller's outer pool stays open, as on a long-lived completion/waiter thread.
-    id<MTL4CommitFeedback> feedback=(id)[NSObject new]; // this handler only consumes its GPU-written readback
-    for (MTL4CommitFeedbackHandler handler in options->handlers) handler(feedback);
+    nvn_gpu_complete(options->handlers, (nvn_gpu_result){0});
     require(checked==1, "completion executes once");
     require(!alive(&weakBuffer), "completion's temporary receiver must not escape to caller pool");
     puts("PASS: GPU payload checked; completion readback destroyed before caller pool drains");

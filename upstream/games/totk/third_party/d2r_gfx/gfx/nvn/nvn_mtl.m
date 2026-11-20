@@ -2,6 +2,7 @@
 // NVN 空设备的 Metal 执行层，见 nvn_mtl.h。
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
+#include "nvn_completion.h"
 #include "nvn_counted.h"   // every library / pipeline outside the game's paths is counted (mtl_counted_*)
 #include "totk_ui_lang.h"
 #import <QuartzCore/CAMetalLayer.h>
@@ -256,17 +257,13 @@ static int nogpu(void) {
     }
     return v;
 }
-@interface TotkCommitOptions : MTL4CommitOptions { @public NSMutableArray *handlers; } @end
+@interface TotkCommitOptions : NSObject { @public NSMutableArray *handlers; }
+- (void)addFeedbackHandler:(nvn_gpu_completion)block;
+@end
 @implementation TotkCommitOptions
-- (void)addFeedbackHandler:(MTL4CommitFeedbackHandler)block {
-    // Inner-pointer methods such as MTLBuffer.contents can autorelease their
-    // receiver. Bound those temporary lifetimes to this callback, including
-    // the synchronous diagnostic path on a long-lived guest thread.
-    MTL4CommitFeedbackHandler completed = ^(id<MTL4CommitFeedback> feedback) {
-        @autoreleasepool { block(feedback); }
-    };
+- (void)addFeedbackHandler:(nvn_gpu_completion)block {
     if (!handlers) handlers = [NSMutableArray array];
-    [handlers addObject:[completed copy]]; [super addFeedbackHandler:completed];
+    [handlers addObject:[block copy]];
 }
 @end
 static void gpu_budget_check(const char *where);
@@ -301,14 +298,28 @@ static void bg_gate(void) {
 }
 static inline void ka_stop_now(void);   // keep-alive spin kernel: leave now, game work is coming (below, keepalive_start)
 static void retire_idle_kick(void);
-static void q4_commit(id<MTL4CommandBuffer> cb, TotkCommitOptions *o) {
+static void q4_commit(id cb, TotkCommitOptions *o) {
+    if (!cb) MDIE("GPU command buffer allocation failed");
     bg_gate();
     gpu_budget_check("提交命令缓冲");
     atomic_fetch_add(&g_q4_inflight, 1);
     ka_stop_now();
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; if (atomic_fetch_sub(&g_q4_inflight, 1) == 1 && g_ka_idle) dispatch_semaphore_signal(g_ka_idle); retire_idle_kick(); }];
-    if (!nogpu()) { id<MTL4CommandBuffer> buffers[] = {cb}; [g_q4 commit:buffers count:1 options:o]; return; }
-    for (MTL4CommitFeedbackHandler h in o->handlers) h(nil);
+    [o addFeedbackHandler:^(nvn_gpu_result f) { (void)f; if (atomic_fetch_sub(&g_q4_inflight, 1) == 1 && g_ka_idle) dispatch_semaphore_signal(g_ka_idle); retire_idle_kick(); }];
+    if (!nogpu()) {
+        if ([cb conformsToProtocol:@protocol(MTLCommandBuffer)]) {
+            if (!nvn_submit_classic(cb, o->handlers)) MDIE("GPU command buffer already submitted");
+            return;
+        }
+        NSArray *handlers = [o->handlers copy];
+        MTL4CommitOptions *options = [MTL4CommitOptions new];
+        [options addFeedbackHandler:^(id<MTL4CommitFeedback> result) {
+            nvn_gpu_complete(handlers, (nvn_gpu_result){result.GPUStartTime, result.GPUEndTime, result.error});
+        }];
+        id<MTL4CommandBuffer> buffers[] = {cb};
+        [g_q4 commit:buffers count:1 options:options];
+        return;
+    }
+    nvn_gpu_complete(o->handlers, (nvn_gpu_result){0});
 }
 static void cb_commit(id<MTLCommandBuffer> cb) { bg_gate(); if (!nogpu()) [cb commit]; }
 static void cb_wait(id<MTLCommandBuffer> cb) { if (!nogpu()) [cb waitUntilCompleted]; }
@@ -2032,7 +2043,7 @@ static void pt_finish(id cb, TotkCommitOptions *o, uint64_t frame, uint64_t fenc
     id<MTL4CounterHeap> heap = g_pt_heap; int n = g_pt_n; pt_ent *ents = malloc((size_t)n * sizeof *ents); memcpy(ents, g_pt, (size_t)n * sizeof *ents);
     uint64_t draws_end = g_stat_draw; double hz = (double)[g_dev queryTimestampFrequency];
     g_pt_heap = nil; g_pt_n = 0;
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+    [o addFeedbackHandler:^(nvn_gpu_result f) {
         (void)f; NSData *dat = [heap resolveCounterRange:NSMakeRange(0, (NSUInteger)n)];
         const MTL4TimestampHeapEntry *ts = dat.bytes; if (!ts || dat.length < (NSUInteger)n * sizeof *ts || hz <= 0) { MLOG("【红】TOTK_PASS_GPU：时间戳读不出"); free(ents); return; }
         double *ms = calloc((size_t)n, sizeof *ms), total = (ts[n - 1].timestamp - ts[0].timestamp) / hz * 1e3; int *ord = calloc((size_t)n, sizeof *ord), m = 0;
@@ -3475,7 +3486,7 @@ static void mtl_sub_split_done(dispatch_semaphore_t completed) {
     NVNGPUErrorTrace *trace = gpu_trace_take(gpu_f, fence_next, (unsigned)g_sub_chunks, @"main-mid");
     NSString *cctx = @(cctx_snap());
     TotkCommitOptions *o = [TotkCommitOptions new];
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+    [o addFeedbackHandler:^(nvn_gpu_result f) {
         gpu_tag_done(gpu_f, f.GPUStartTime, f.GPUEndTime);
         if (f.error) {
             gpu_error_report(f.error, trace, f.GPUStartTime, f.GPUEndTime, cctx);
@@ -3485,7 +3496,7 @@ static void mtl_sub_split_done(dispatch_semaphore_t completed) {
     }];
     uint64_t tlid = totk_tl_on() ? totk_tl_commit_id() : 0;
     if (tlid) { totk_tl_at_frame(TL_COMMIT, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gpu_f, tlid, 0);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> fb) { totk_tl_at_frame(TL_GPU, (uint64_t)(fb.GPUStartTime * 1e9), gpu_f, tlid, (uint64_t)(fb.GPUEndTime * 1e9)); }]; }
+        [o addFeedbackHandler:^(nvn_gpu_result fb) { totk_tl_at_frame(TL_GPU, (uint64_t)(fb.GPUStartTime * 1e9), gpu_f, tlid, (uint64_t)(fb.GPUEndTime * 1e9)); }]; }
     id<MTL4CommandBuffer> next = [g_dev newCommandBuffer];
     if (early) { w0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); rs_sync(); fc1 = fc0 + (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0); }   // fc1 - fc0: the wait, as before
     cb_submit_label(g_cb, gpu_f, "main-mid", fence_next, tlid);
@@ -3575,11 +3586,11 @@ uint64_t mtl_sub_commit(void) {
     noread_drain_log();   // OOT_NOREAD_PROBE
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     TotkCommitOptions *o = [TotkCommitOptions new];
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; nvn_dirty_read_wait_exempt(1); for (dispatch_block_t block in commit_blocks) block(); }];   // OOT_GPU_READ_FENCE: a completion thread never waits for a GPU reader (its guest writes are the GPU timeline's)
+    [o addFeedbackHandler:^(nvn_gpu_result f) { (void)f; nvn_dirty_read_wait_exempt(1); for (dispatch_block_t block in commit_blocks) block(); }];   // OOT_GPU_READ_FENCE: a completion thread never waits for a GPU reader (its guest writes are the GPU timeline's)
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
     NVNGPUErrorTrace *trace = gpu_trace_take(gpu_f, fence, (unsigned)g_sub_chunks, @"main-final");
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+    [o addFeedbackHandler:^(nvn_gpu_result cb) {
         nvn_dirty_read_wait_exempt(1);   // OOT_GPU_READ_FENCE: the semaphore / counter results below are GPU-timeline writes; g_done for this fence moves only after them (rdf1: the wait here stalled every completion 3 s -> GPU watchdog)
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
         if (cb.error) {
@@ -3643,10 +3654,10 @@ uint64_t mtl_sub_commit(void) {
     res_commit();
     uint64_t tlid = totk_tl_on() ? totk_tl_commit_id() : 0;
     if (tlid) { totk_tl_at_frame(TL_COMMIT, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gpu_f, tlid, 1); totk_tl_at_frame(TL_FENCE, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gpu_f, tlid, fence);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> fb) { totk_tl_at_frame(TL_GPU, (uint64_t)(fb.GPUStartTime * 1e9), gpu_f, tlid, (uint64_t)(fb.GPUEndTime * 1e9)); }]; }
+        [o addFeedbackHandler:^(nvn_gpu_result fb) { totk_tl_at_frame(TL_GPU, (uint64_t)(fb.GPUStartTime * 1e9), gpu_f, tlid, (uint64_t)(fb.GPUEndTime * 1e9)); }]; }
     for (NSNumber *entry in g_vr_native_slots) {
         const int slot = entry.intValue;
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { vr_source_done(slot, !f.error); }];
+        [o addFeedbackHandler:^(nvn_gpu_result f) { vr_source_done(slot, !f.error); }];
     }
     g_vr_native_slots = nil;
     cb_submit_label(g_cb, gpu_f, "main-final", fence, tlid);
@@ -5347,7 +5358,7 @@ static void up_flush(void) {
     uint32_t pool_mask = g_up_batch_pool, spool_mask = g_up_batch_spool;
     up_memory memory=up_memory_snapshot(staging);up_memory_write("submit",memory,0);
     atomic_fetch_add(&g_up_pending, 1);
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+    [o addFeedbackHandler:^(nvn_gpu_result f) {
         up_memory_write("complete",memory,f.error!=nil);
         if (f.error) MLOG("【红】上传命令缓冲执行出错：batch=%llu frame=%llu reserved=%llu source=%llu private=%llu shared=%llu targets=%llu resident=%llu pending=%u: %s",
             (unsigned long long)memory.seq,(unsigned long long)memory.frame,(unsigned long long)memory.accounted,
@@ -22349,7 +22360,7 @@ static void anom_present(id<MTLTexture> src, uint64_t frame) {
     [be copyFromTexture:src toTexture:g_anom_img[slot]];
     m4_end(be); cb_submit_label(g_anom_cb, atomic_load(&g_cur_frame), "anomaly-probe", 0, 0); [g_anom_cb endCommandBuffer];
     dispatch_semaphore_t done = dispatch_semaphore_create(0); __block int failed = 0;
-    TotkCommitOptions *o = [TotkCommitOptions new]; [o addFeedbackHandler:^(id<MTL4CommitFeedback> fb) {
+    TotkCommitOptions *o = [TotkCommitOptions new]; [o addFeedbackHandler:^(nvn_gpu_result fb) {
         failed = fb.error != nil; if (failed) MLOG("【红】[anom] GPU readback failed: %s", fb.error.localizedDescription.UTF8String);
         dispatch_semaphore_signal(done); }];
     q4_commit(g_anom_cb, o); dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
@@ -22525,7 +22536,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             sourceSize:MTLSizeMake(128, 128, 1) toBuffer:g_flash_guard_sample destinationOffset:0 destinationBytesPerRow:512 destinationBytesPerImage:65536];
         m4_end(be); cb_submit_label(g_flash_guard_cb, atomic_load(&g_cur_frame), "flash-probe", 0, 0); [g_flash_guard_cb endCommandBuffer];
         dispatch_semaphore_t done = dispatch_semaphore_create(0); __block int failed = 0;
-        TotkCommitOptions *o = [TotkCommitOptions new]; [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        TotkCommitOptions *o = [TotkCommitOptions new]; [o addFeedbackHandler:^(nvn_gpu_result f) {
             failed = f.error != nil; dispatch_semaphore_signal(done); }];
         q4_commit(g_flash_guard_cb, o); dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
         if (!failed) {
@@ -22763,12 +22774,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [cb endCommandBuffer];
     TotkCommitOptions *o = [TotkCommitOptions new];
     { int timed = alloc_i >= 0 && alloc_i < 3 && g_outup_timed[alloc_i], slot = alloc_i;
-      [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+      [o addFeedbackHandler:^(nvn_gpu_result f) {
           sysload_note_gpu(f.GPUStartTime, f.GPUEndTime);   // the load line's game GPU share includes the present (and its MetalFX upscale)
           if (timed && !f.error) outup_note_gpu(slot); }]; }
     if (src_buf) { id<MTLBuffer> buf = src_buf; size_t w = src_w, h = src_h; NSString *path = grab_src;
         MLOG("[wshot-frame] %s present-frame=%llu game-frame=%llu", path.UTF8String, (unsigned long long)frame, (unsigned long long)atomic_load(&g_cur_frame));
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        [o addFeedbackHandler:^(nvn_gpu_result f) {
             if (!f.error) { CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
                 CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, w * 4, cs, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
                 CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; window_shot_save(img, path);
@@ -22776,7 +22787,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             res_remove(buf); }]; }
     if (game_buf) { void (^g)(CGImageRef) = grab_game; id<MTLBuffer> buf = game_buf; size_t w = game_w, h = game_h;
         int bgra = src.pixelFormat == MTLPixelFormatBGRA8Unorm || src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;   // 字节序同 shot_body | the byte order as shot_body
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        [o addFeedbackHandler:^(nvn_gpu_result f) {
             CGImageRef img = NULL; CGContextRef ctx = NULL; CGColorSpaceRef cs = NULL;
             if (!f.error) { cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
                 CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
@@ -22786,7 +22797,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             if (img) CGImageRelease(img); if (ctx) CGContextRelease(ctx); if (cs) CGColorSpaceRelease(cs);
             res_remove(buf); }]; }
     if (grab_buf) { void (^g)(CGImageRef) = grab; void (^gg)(CGImageRef) = grab_game && !game_sdr ? grab_game : nil; id<MTLBuffer> buf = grab_buf; size_t w = grab_w, h = grab_h;
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        [o addFeedbackHandler:^(nvn_gpu_result f) {
             CGImageRef img = NULL; CGContextRef ctx = NULL; CGColorSpaceRef cs = NULL;
             NSMutableData *sdr=nil;
             if (!f.error) { cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -22810,7 +22821,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             if (gg) gg(img);
             if (img) CGImageRelease(img); if (ctx) CGContextRelease(ctx); if (cs) CGColorSpaceRelease(cs);
             res_remove(buf); }]; }
-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+    [o addFeedbackHandler:^(nvn_gpu_result f) {
         if (f.error) MLOG("【红】上屏命令缓冲错误：%s", f.error.description.UTF8String);
         vr_source_done(vr_slot, !f.error);
         if (probe && !f.error) {
@@ -23123,7 +23134,7 @@ static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
             atomic_store(&g_mfx_busy[a], 1);
             TotkCommitOptions *o = [TotkCommitOptions new];
             id<MTL4CounterHeap> h = heap; double fq = hz;
-            [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+            [o addFeedbackHandler:^(nvn_gpu_result f) {
                 // Capturing the payload keeps this frame's inputs/output and
                 // interpolator alive even across a canvas/configuration change.
                 if (frame_resources.count != 9) MDIE("invalid interpolation resource lifetime payload");   // mfx_frame_encode: eight inputs and outputs, and the depth kept for the next frame

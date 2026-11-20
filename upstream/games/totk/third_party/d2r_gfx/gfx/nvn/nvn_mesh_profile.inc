@@ -32,7 +32,7 @@ static void ms_time_finish(TotkCommitOptions *options,uint64_t fence) {
     int count=g_ms_count;ms_time *records=malloc((size_t)count*sizeof *records);memcpy(records,g_ms_times,(size_t)count*sizeof *records);
     NSMutableArray<id<MTL4CounterHeap>> *heaps=[NSMutableArray array];for(int i=0;i<(count+MS_DRAWS_PER_HEAP-1)/MS_DRAWS_PER_HEAP;i++){[heaps addObject:g_ms_heaps[i]];g_ms_heaps[i]=nil;}
     id<MTLBuffer> grids=g_ms_grids;g_ms_grids=nil;g_ms_grid_sources=nil;g_ms_count=g_ms_grid_count=0;double hz=(double)[g_dev queryTimestampFrequency];
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback){
+    [options addFeedbackHandler:^(nvn_gpu_result feedback){
         NSMutableData *data=[NSMutableData data];for(NSUInteger h=0;h<heaps.count;h++){NSUInteger entries=MIN(MS_DRAWS_PER_HEAP,count-h*MS_DRAWS_PER_HEAP)*4;NSData *part=[heaps[h] resolveCounterRange:NSMakeRange(0,entries)];if(part)[data appendData:part];}
         if(feedback.error||data.length!=(NSUInteger)count*4*sizeof(MTL4TimestampHeapEntry)||hz<=0){MLOG("[mesh-gpu] invalid feedback/counters fence=%llu",(unsigned long long)fence);free(records);return;}
         const MTL4TimestampHeapEntry *t=data.bytes;const uint32_t *grid=grids.contents;FILE *f=fopen(getenv("OOT_MESH_GPU_FILE"),"a");

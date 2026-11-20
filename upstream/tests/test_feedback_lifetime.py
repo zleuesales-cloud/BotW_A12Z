@@ -14,11 +14,12 @@ from dev.game_slot import GameSlot
 @unittest.skipUnless(sys.platform == 'darwin', 'requires Metal 4')
 class FeedbackLifetime(unittest.TestCase):
     def test_production_callback_drains_temporary_receivers(self):
-        source = (ROOT / 'games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m').read_text()
+        nvn = ROOT / 'games/totk/third_party/d2r_gfx/gfx/nvn'
+        source = (nvn / 'nvn_mtl.m').read_text()
         start = source.index('@interface TotkCommitOptions')
         end = source.index('\n@end', source.index('@implementation TotkCommitOptions', start)) + len('\n@end')
-        fixed = source[start:end]
-        negative = re.sub(r'@autoreleasepool\s*\{\s*block\(feedback\);\s*\}', 'block(feedback);', fixed)
+        fixed = source[start:end] + '\n' + (nvn / 'nvn_completion.m').read_text()
+        negative = re.sub(r'@autoreleasepool\s*\{\s*handler\(result\);\s*\}', 'handler(result);', fixed)
         self.assertNotEqual(fixed, negative, 'negative control must remove the production pool')
         template = (ROOT / 'tests/feedback_lifetime_probe.m').read_text()
         with tempfile.TemporaryDirectory() as directory:
@@ -27,7 +28,7 @@ class FeedbackLifetime(unittest.TestCase):
             for name, body in [('fixed', fixed), ('unbounded-caller-pool', negative)]:
                 file, binary = work / (name + '.m'), work / name
                 file.write_text(template.replace('// COMMIT_OPTIONS', body))
-                subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-fsanitize=address,undefined',
+                subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-fsanitize=address,undefined', '-I'+str(nvn),
                                 str(file), '-framework', 'Foundation', '-framework', 'Metal', '-o', str(binary)], check=True)
                 binaries.append((name, binary))
             with GameSlot(owner='tests', purpose='GPU completion temporary lifetime', expect_seconds=60) as slot:
