@@ -77,11 +77,26 @@ class RingInTheRenderer(unittest.TestCase):
         self.assertIn('g_pring_pic[ring] = rr.picture;', present)
 
     def test_the_present_reads_the_slot_from_its_origin(self):
-        now = function_body(self.src, 'static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4]')
+        now = function_body(self.src, 'static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, uint64_t producer_fence, const int crop[4]')
         swap, rebind = now.index('hdr_swap_texture('), now.index('nvn_ring_present_crop(')
         self.assertLess(swap, rebind, 'after the HDR source took the place of the slot')
         self.assertIn('if (ring >= 0 && src == g_pring[ring]) crop = nvn_ring_present_crop(g_pring_pic[ring], src.width, src.height, crop, ring_crop);', now)
         self.assertNotIn('crop', now[:swap].split('{', 1)[1], 'nothing reads the crop before that')
+
+    def test_apple5_present_uses_the_queued_ring_fence(self):
+        present = function_body(self.src, 'uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {')
+        self.assertIn('g_present_apple5 || (pring_on() && link_on())', present, 'Apple5 always snapshots, including link-off fallback')
+        self.assertIn('producer_fence = mtl_sub_commit();', present, 'capture the exact fence that produced the ring image')
+        self.assertIn('.producer_fence = producer_fence', present)
+        submit = function_body(self.src, 'static int present_classic_submit(')
+        self.assertIn('[cb encodeWaitForEvent:g_ev value:producer_fence];', submit)
+        self.assertNotIn('&g_fence', submit, 'a later global fence can belong to a different queued image')
+        self.assertIn('if (ring >= 0) g_pring_busy[ring] = 0;', submit, 'release the immutable snapshot only after GPU completion')
+        now = function_body(self.src, 'static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, uint64_t producer_fence, const int crop[4]')
+        self.assertLess(now.index('if (g_present_apple5 && flash_guard)'), now.index('g_flash_guard_alloc = [g_dev newCommandAllocatorWithDescriptor:d error:&e]'))
+        self.assertIn('if (interp < 0 && !g_present_apple5) anom_present(src, frame);', now)
+        self.assertLess(now.index('if (g_present_apple5) {'), now.index('[g_q4 waitForDrawable:dr]'))
+        self.assertNotIn('g_q && [g_q respondsToSelector:@selector(commandBuffer)]', now)
 
     def test_a_slot_is_busy_from_the_moment_its_ticket_is_taken(self):
         """The slot was free between the queue moving past its ticket and the present marking it busy; a present of

@@ -9,3 +9,5 @@ Current: the iOS CPU target is apple-a12. Upstream ARM64 timing and pad-repeat c
 Existing game data stays outside this repository. The connected iPad already holds the game data under org.macnativegames.botw.a12z; do not uninstall it or replace saves. Hardware evidence is in evidence/APPLE5_CAPABILITIES.json (argument_buffer_tier uses the raw Metal enum: 0 is Tier 1).
 
 The rejected traditional Metal candidate is retained in commit 20b67c2: it lacks BotW version support and uses raw argument-buffer resource layout. Historical Apple5 source is missing; its log contains skipped opcodes, so its successful launch is not gameplay validation.
+
+Classic Present now uses leased ring snapshots and each picture's producing fence on Apple5. Production 720p-to-1080p crop/readback and ring waiting tests passed on the Mac; the renderer compiles for iOS/A12. Main initialization and replay remain MTL4-dependent, so this is not end-to-end device support.

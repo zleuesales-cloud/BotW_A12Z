@@ -1,0 +1,6 @@
+Executor: lunna_max / GPT-6 Luna / max; parent reviewed final diff.
+python3 -m unittest upstream.tests.test_present_ring_region upstream.tests.test_present_ring_reserve upstream.tests.test_ios_display_pacing upstream.tests.test_present_encoder: 9 passed.
+Production present encoder GPU crop/readback: 1280x720 -> 1920x1080 on Mac.
+GPU completion: 1 passed. Feedback lifetime: 1 passed, with negative control failing as expected.
+iOS arm64 apple-a12 object compilation passed; object SHA256 is recorded in project.json.
+No full App link, iPad drawable run, map entry, or performance/stability acceptance. Main initialization, replay, uploads and Shader binding still need Apple5 adaptation.

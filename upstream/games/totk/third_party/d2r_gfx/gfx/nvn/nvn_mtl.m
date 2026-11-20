@@ -172,12 +172,14 @@ extern void runtime_audio_hold(int) __attribute__((weak_import));
 extern void runtime_boot_status(const char *,const char *) __attribute__((weak_import));
 
 static id<MTLDevice> g_dev;
+static int g_present_apple5;
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
 static dispatch_queue_t g_feedback_q;
 static _Atomic uint32_t g_present_qos;
+static _Atomic int g_present_discard;
 /* OOT (2026-11-08): queue ordering commits each parked / resumed part separately, about 18 command buffers a frame; with 8
    the replay could run less than half a frame ahead and waited for the GPU about twice a frame (allocator waits), so GPU
    and replay took turns. How far ahead it runs stays bounded by the game's swapchain acquire. */
@@ -1115,6 +1117,10 @@ void mtl_init(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("没有 Metal 设备");
     if (!g_dev.hasUnifiedMemory) MDIE("需要统一内存设备（零拷贝内存池）");
+#if TARGET_OS_IPHONE
+    g_present_apple5 = [g_dev supportsFamily:MTLGPUFamilyApple5] && ![g_dev supportsFamily:MTLGPUFamilyMetal4];
+    if (g_present_apple5) MLOG("Apple5 without Metal4: classic present enabled; NVN replay remains on its existing submission path");
+#endif
     g_q = [g_dev newCommandQueue];
     MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
     rd.initialCapacity = 4096;
@@ -21359,7 +21365,7 @@ void mtl_res_counts(uint32_t tick, const char *why) {
 #define SHOTQ_MAX 64
 static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
-static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int fps_overlay);
+static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int overlay_slot, int fps_overlay);
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i);
 // 整窗截图要的游戏画面（前端 window_shot，不再对挂着显示节拍的 Metal 图层做 drawViewHierarchy）：下一次上屏时，出图线程把同一帧
 // 按上屏同一套编码（present_encode）画进一张与交换链同尺寸的离屏贴图，GPU 做完后在完成回调里交出 CGImage（回调不阻塞上屏）。g_shotq_mu 护
@@ -21382,7 +21388,7 @@ static void grab_present(void (^cb)(CGImageRef), id<MTLTexture> src, const int c
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; id<MTLBuffer> buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil;
     id<MTLCommandBuffer> cb2 = buf ? q_cb() : nil;
-    if (!cb2 || !present_encode(cb2, src, out, crop, 1)) { MLOG("【红】整窗截图：游戏画面离屏编码失败（%zux%zu）", w, h); cb(NULL); return; }
+    if (!cb2 || !present_encode(cb2, src, out, crop, 3, 1)) { MLOG("【红】整窗截图：游戏画面离屏编码失败（%zux%zu）", w, h); cb(NULL); return; }
     id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
     [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
     [b endEncoding];
@@ -21481,7 +21487,7 @@ static void shot_body(id<MTLTexture> src, const char *path, int screen, const in
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
         if (!out) { MLOG("【红】截图输出贴图建不出 %dx%d", out_w, out_h); return; }
         id<MTLCommandBuffer> cb = q_cb();
-        if (!present_encode(cb, src, out, crop, 0)) return;
+        if (!present_encode(cb, src, out, crop, 3, 0)) return;
         cb_commit(cb); cb_wait(cb);
         read = out;
     }
@@ -21489,7 +21495,7 @@ static void shot_body(id<MTLTexture> src, const char *path, int screen, const in
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:read.width height:read.height mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d]; id<MTLCommandBuffer> cb = out ? q_cb() : nil;
-        if (!out || !present_encode(cb, read, out, NULL, 0)) { MLOG("【红】截图：HDR 目标转换失败"); return; }
+        if (!out || !present_encode(cb, read, out, NULL, 3, 0)) { MLOG("【红】截图：HDR 目标转换失败"); return; }
         cb_commit(cb); cb_wait(cb); read = out;
     }
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
@@ -22136,7 +22142,7 @@ static MTLViewport present_viewport(double dw, double dh, double cw, double ch) 
     double w = fmin(dw, dh * want), h = w / want;
     return (MTLViewport){floor((dw - w) / 2), floor((dh - h) / 2), round(w), round(h), 0, 1};
 }
-static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int fps_overlay) {
+static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int overlay_slot, int fps_overlay) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
         if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||
@@ -22145,6 +22151,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
         }
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
+    if (crop) atomic_store(&g_pic_big, cw >= 5120 && ch >= 2880 ? 3 : cw >= 3840 && ch >= 2160 ? 2 : cw > 1920 || ch > 1080);
     atomic_store(&g_out_w, (uint32_t)cw); atomic_store(&g_out_h, (uint32_t)ch);
     static uint64_t last_crop[8]; uint64_t meta[8] = {src.width, src.height, cx, cy, cw, ch, dst.width, dst.height};
     if (memcmp(meta, last_crop, sizeof meta)) { memcpy(last_crop, meta, sizeof meta);
@@ -22166,6 +22173,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp]; es_reset();
+    if (!en) { MLOG("【红】classic Metal 出图渲染编码器创建失败"); return 0; }
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_hdr_pso && (src.pixelFormat==MTLPixelFormatRGBA16Float || dst.pixelFormat==MTLPixelFormatRGBA16Float) ? g_blit_hdr_pso : g_blit_pso];   // an FP16 picture or drawable: the HDR copy
     [en setFragmentTexture:src atIndex:0];
@@ -22181,16 +22189,16 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [en setRenderPipelineState:g_blit_pso];
     MTLViewport ovp; float fuv[8];
-    if (fps_overlay && fps_overlay_prepare(3, vp, &ovp, fuv)) {
-        [en setViewport:ovp]; [en setFragmentTexture:g_fps_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
+    if (fps_overlay && fps_overlay_prepare(overlay_slot, vp, &ovp, fuv)) {
+        [en setViewport:ovp]; [en setFragmentTexture:g_fps_tex[overlay_slot] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
-    if (fps_overlay && shader_overlay_prepare(3, vp, &ovp, fuv)) {
-        [en setViewport:ovp]; [en setFragmentTexture:g_shd_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
+    if (fps_overlay && shader_overlay_prepare(overlay_slot, vp, &ovp, fuv)) {
+        [en setViewport:ovp]; [en setFragmentTexture:g_shd_tex[overlay_slot] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
-    if (fps_overlay && load_overlay_prepare(3, vp, &ovp, fuv)) {
-        [en setViewport:ovp]; [en setFragmentTexture:g_load_tex[3] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
+    if (fps_overlay && load_overlay_prepare(overlay_slot, vp, &ovp, fuv)) {
+        [en setViewport:ovp]; [en setFragmentTexture:g_load_tex[overlay_slot] atIndex:0]; [en setFragmentBytes:fuv length:sizeof fuv atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
     [en endEncoding];
@@ -22475,7 +22483,63 @@ static double present_min_duration(double period) {
     return whole - fmin(0.001, tick / 4);
 }
 #endif
-static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], __strong id<CAMetalDrawable> supplied, double target_ts, int interp) {
+/* Ordinary game presents use the classic queue only when no MTL4-only output feature is active.
+   The shared event carries the replay queue's last committed fence across the two queue APIs. */
+static int present_classic_submit(id<CAMetalDrawable> dr, id<MTLTexture> src, const int crop[4],
+                                  double period, double target_ts, uint64_t producer_fence,
+                                  uint64_t frame, uint64_t ticket, int ring, int slot) {
+    pthread_mutex_lock(&g_pq_mu);
+    while (g_present_alloc_busy[slot]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    pthread_mutex_unlock(&g_pq_mu);
+    id<MTLCommandBuffer> cb = [g_q commandBuffer];
+    if (!cb) MDIE("classic Metal present command buffer allocation failed");
+    [cb encodeWaitForEvent:g_ev value:producer_fence];
+    if (!present_encode(cb, src, dr.texture, crop, slot, 1)) return 0;
+    NVNGPUErrorTrace *trace = gpu_trace_take(frame, producer_fence, 0, @"present-classic");
+    TotkCommitOptions *o = [TotkCommitOptions new];
+    __block int command_completed = 0, command_failed = 0;
+    __block CFTimeInterval presented_time = 0;
+    [o addFeedbackHandler:^(nvn_gpu_result f) {
+        sysload_note_gpu(f.GPUStartTime, f.GPUEndTime);
+        if (f.error) {
+            MLOG("【红】classic Metal 上屏命令缓冲错误：%s", f.error.description.UTF8String);
+            gpu_error_report(f.error, trace, f.GPUStartTime, f.GPUEndTime, @"classic present");
+            gpu_hang_guard(f.error);
+        }
+        CFTimeInterval shown = 0;
+        pthread_mutex_lock(&g_pq_mu);
+        command_completed = 1; command_failed = f.error != nil;
+        g_present_alloc_busy[slot] = 0;
+        if (ring >= 0) g_pring_busy[ring] = 0;
+        if (ticket > g_pq_done) g_pq_done = ticket;
+        if (f.error) g_pres[ticket % PRING] = (pres_ent){ticket, -1};
+        else if (presented_time != 0) { shown = presented_time; g_pres[ticket % PRING] = (pres_ent){ticket, shown > 0 ? shown : -1}; }
+        if (!f.error && g_pdiag[ticket % PRING].n == ticket) g_pdiag[ticket % PRING].blit_end = f.GPUEndTime;
+        g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+        if (shown > 0) { cadence_note(shown, NO); front_frame_presented(); }
+    }];
+    [dr addPresentedHandler:^(id<MTLDrawable> drawable) {
+        CFTimeInterval t = drawable.presentedTime;
+        int count = 0;
+        pthread_mutex_lock(&g_pq_mu);
+        presented_time = t > 0 ? t : -1;
+        if (command_failed) g_pres[ticket % PRING] = (pres_ent){ticket, -1};
+        else if (command_completed) { g_pres[ticket % PRING] = (pres_ent){ticket, t > 0 ? t : -1}; count = t > 0; }
+        pthread_mutex_unlock(&g_pq_mu);
+        if (count) { cadence_note(t, NO); front_frame_presented(); }
+    }];
+#if TARGET_OS_SIMULATOR
+    (void)period; [cb presentDrawable:dr];
+#else
+    if (target_ts > 0) [cb presentDrawable:dr];   // CAMetalDisplayLink has already scheduled this supplied drawable for its update timestamp
+    else if (period > 0) [cb presentDrawable:dr afterMinimumDuration:present_min_duration(period)];
+    else [cb presentDrawable:dr];
+#endif
+    pthread_mutex_lock(&g_pq_mu); g_present_alloc_busy[slot] = 1; g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+    q4_commit(cb, o);
+    return 1;
+}
+static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, uint64_t producer_fence, const int crop[4], __strong id<CAMetalDrawable> supplied, double target_ts, int interp) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     /* TOTK: the FPS box counts game presents per second and, while MetalFX interpolates, the generated frames shown as
@@ -22499,8 +22563,13 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if(interp<0){id<MTLTexture> linear=hdr_swap_texture(t->serial,frame,&t_hdr_present_white,&t_hdr_present_peak);if(linear){src=linear;hdrFrame=YES;}}
     int ring_crop[4];   // a slot that is the picture alone is read from its origin; any other source keeps the game's crop
     if (ring >= 0 && src == g_pring[ring]) crop = nvn_ring_present_crop(g_pring_pic[ring], src.width, src.height, crop, ring_crop);
+    if (g_present_apple5 && !nogpu() && (ring < 0 || src != g_pring[ring] || src.textureType != MTLTextureType2D || src.sampleCount != 1)) {
+        MLOG("【红】Apple5 classic present requires its immutable 2D source snapshot; no MTL4 present was submitted");
+        return 0;
+    }
     if (!src) { RED_ONCE(8, "出图贴图建不出 MTLTexture"); return 0; }
-    if (interp < 0) anom_present(src, frame);   // TOTK_ANOMALY
+    if (interp < 0 && !g_present_apple5) anom_present(src, frame);   // TOTK_ANOMALY uses an MTL4 readback encoder
+    else if (interp < 0 && g_present_apple5 && anom_on()) { static int said; if (!said++) MLOG("【红】Apple5 skipped TOTK_ANOMALY because its readback encoder requires MTL4"); }
     /* One-frame temporal fallback (TOTK_FLASH_GUARD=1, off by default): a same-queue readback of the picture's centre
        before the drawable is encoded; on an abrupt colour jump the previous good picture is shown again, at most twice
        in a row. It was a stopgap against the frame-wide flashes; their cause (compressible storage shared across formats,
@@ -22511,6 +22580,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         flash_guard = e && atoi(e) != 0 && !getenv("TOTK_PRESENT_SKIP");
         MLOG("闪屏保护：%s（TOTK_FLASH_GUARD=1 打开；爆闪根因已修，见 stor_compressed）", flash_guard ? "开" : "关");
     }
+    if (g_present_apple5 && flash_guard) { MLOG("【红】Apple5 skipped TOTK_FLASH_GUARD because its readback encoder requires MTL4"); flash_guard = 0; }
     int flash_guard_update = 0;
     if (flash_guard && interp < 0 && !nogpu() && src.width >= 128 && src.height >= 128 &&
         (src.pixelFormat == MTLPixelFormatBGRA8Unorm || src.pixelFormat == MTLPixelFormatRGBA8Unorm)) {
@@ -22670,7 +22740,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 #else
     (void)hdrFrame;
 #endif
-    if (g_present_layer_resident != layer) { if (!layer.residencySet) MDIE("present layer has no residency set (layer device %s)", layer.device ? "set" : "missing"); [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
+    if (g_present_layer_resident != layer) {
+        id<MTLResidencySet> layer_residency = layer.residencySet;
+        if (!layer_residency && !g_present_apple5) MDIE("present layer has no residency set (layer device %s)", layer.device ? "set" : "missing");
+        if (layer_residency) {
+            if (g_present_apple5) [g_q addResidencySet:layer_residency];
+            else [g_q4 addResidencySet:layer_residency];
+        }
+        g_present_layer_resident = layer;
+    }
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // 窗口模式按显示器垂直同步，防撕裂 | Windowed mode follows the display's vsync to prevent tearing
 #endif
@@ -22686,12 +22764,25 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     static int present_skip = -1; if (present_skip < 0) { present_skip = getenv("TOTK_PRESENT_SKIP") != NULL; if (present_skip) MLOG("【实验】TOTK_PRESENT_SKIP=1：不出图，只测渲染流水线"); }
     if (nogpu() || present_skip) { if (grab) { if (present_skip && !nogpu()) grab_present(grab, src, crop, layer.drawableSize); else grab(NULL); }
         if (grab_game) grab_game(NULL);
-        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); return 1; }
+        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ring >= 0) g_pring_busy[ring] = 0;
+        pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); return 1; }
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) { if (grab) grab(NULL); if (grab_game) grab_game(NULL); return 0; }
     int alloc_i = (int)((ticket * 2 + (interp >= 0 ? 0 : 1)) % 3);   // the interpolated frame of a ticket and the ticket's own frame use different allocators
+    if (g_present_apple5) {
+        if (interp >= 0 || ring < 0 || src != g_pring[ring] || dr.texture.textureType != MTLTextureType2D || dr.texture.sampleCount != 1) {
+            MLOG("【红】Apple5 drawable/source shape is unsupported by classic present; no MTL4 present was submitted");
+            if (grab) grab(NULL); if (grab_game) grab_game(NULL); return 0;
+        }
+        if (g_present_probe) MLOG("【红】DM_PRESENT_PROBE requires the MTL4 present encoder and was skipped on Apple5");
+        if (grab || grab_game) {
+            MLOG("【红】frame capture requires the MTL4 present encoder and was skipped on Apple5");
+            if (grab) grab(NULL); if (grab_game) grab_game(NULL);
+        }
+        return present_classic_submit(dr, src, crop, period, target_ts, producer_fence, frame, ticket, ring, alloc_i);
+    }
     pthread_mutex_lock(&g_pq_mu);
     while (g_present_alloc_busy[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
     pthread_mutex_unlock(&g_pq_mu);
@@ -22906,10 +22997,43 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; int interp, interp_shown; double interp_ts; int ring; } pq_item;   // interp (TOTK_MFX): output slot of the frame shown before this one, or -1; interp_ts: the refresh it was shown at   // t_in：游戏把这一帧交进出图队列的时刻（CACurrentMediaTime） | t_in: the time the game handed this frame into the present queue (CACurrentMediaTime)
+typedef struct { tex_t t; double period; uint64_t frame, producer_fence; int crop[4]; double t_in; int interp, interp_shown; double interp_ts; int ring; } pq_item;   // producer_fence: committed fence for the queued source image
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
-static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double, int);
+static int present_now(const tex_t *, double, uint64_t, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double, int);
+void mtl_present_wait(uint64_t tk);
+
+static int present_ring_reserve(void) {
+    int counted_full = 0;
+    for (;;) {
+        int ring = -1;
+        uint64_t wait_ticket = 0;
+        pthread_mutex_lock(&g_pq_mu);
+        if (atomic_load(&g_present_discard)) { pthread_mutex_unlock(&g_pq_mu); return -1; }
+        for (int i = 0; i < PRING_N; i++) if (g_pring_tk[i] <= g_pq_read && !g_pring_busy[i]) {
+            ring = i; g_pring_tk[i] = UINT64_MAX; break;
+        }
+        if (ring < 0) {
+            for (int i = 0; i < PRING_N; i++)
+                if (!g_pring_busy[i] && g_pring_tk[i] != UINT64_MAX && g_pring_tk[i] > g_pq_read &&
+                    (!wait_ticket || g_pring_tk[i] < wait_ticket)) wait_ticket = g_pring_tk[i];
+            if (!counted_full) { g_pring_full++; counted_full = 1; }
+            if (wait_ticket) { pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(wait_ticket); }
+            else { if (!atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
+            continue;
+        }
+        pthread_mutex_unlock(&g_pq_mu);
+        return ring;
+    }
+}
+
+static void present_ring_release_reservation(int ring) {
+    if (ring < 0) return;
+    pthread_mutex_lock(&g_pq_mu);
+    if (g_pring_tk[ring] == UINT64_MAX) g_pring_tk[ring] = g_pq_read;
+    pthread_cond_broadcast(&g_pq_cv);
+    pthread_mutex_unlock(&g_pq_mu);
+}
 
 @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
 @end
@@ -22975,7 +23099,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     t_pn_ring = ring;
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp, interp); }
+    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.producer_fence, it.crop, update.drawable, update.targetPresentationTimestamp, interp); }
     t_pn_ring = -1;
     if (ring >= 0 && !submitted) { pthread_mutex_lock(&g_pq_mu); g_pring_busy[ring] = 0; pthread_mutex_unlock(&g_pq_mu); }
     if (!submitted && interp < 0) {
@@ -23082,9 +23206,9 @@ static void *present_main(void *arg) {
         int hz = mtl_display_hz(); double tick = 1.0 / (hz > 0 ? hz : 60);   // the window may change display
         pthread_mutex_lock(&g_pq_mu); int behind = g_pq_read < g_pq_in; pthread_mutex_unlock(&g_pq_mu);
         int show_interp = it.interp >= 0 && !behind;
-        if (show_interp) { @autoreleasepool { (void)present_now(&it.t, fmin(it.period / 2, tick), it.frame, ticket, it.crop, nil, 0, it.interp); } }
+        if (show_interp) { @autoreleasepool { (void)present_now(&it.t, fmin(it.period / 2, tick), it.frame, ticket, it.producer_fence, it.crop, nil, 0, it.interp); } }
         t_pn_ring = it.ring;
-        @autoreleasepool { submitted = present_now(&it.t, show_interp ? it.period / 2 : it.period, it.frame, ticket, it.crop, nil, 0, -1); }
+        @autoreleasepool { submitted = present_now(&it.t, show_interp ? it.period / 2 : it.period, it.frame, ticket, it.producer_fence, it.crop, nil, 0, -1); }
         t_pn_ring = -1;
         if (it.ring >= 0 && !submitted) { pthread_mutex_lock(&g_pq_mu); g_pring_busy[it.ring] = 0; pthread_mutex_unlock(&g_pq_mu); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
@@ -23099,7 +23223,6 @@ static void *present_main(void *arg) {
 }
 uint32_t mtl_present_qos(void) { return atomic_load(&g_present_qos); }
 static void present_start(void) { pthread_t th; if (pthread_create(&th, NULL, present_main, NULL)) MDIE("出图线程起不来"); pthread_detach(th); }
-static _Atomic int g_present_discard;
 void mtl_link_pause(int on);
 // 前端进后台、等游戏存盘那一小段：出图直接丢（显示节拍后台不回调，入队会把游戏线程堵住；画面也没人看）。
 // 打开时把已经排着队的帧一并清掉：系统是先停节拍回调、之后才通知进后台，这段空档里游戏已把交换链画满，正卡在「取下一张贴图前等它上一次出图处理完」
@@ -23107,7 +23230,11 @@ void mtl_link_pause(int on);
 // The short period when the front end goes to the background and waits for the game to save: presents are dropped directly (the display link does not call back in the background, enqueueing would block the game thread; nobody sees the picture anyway).
 // When turned on, also clear the frames already queued: the system first stops the display-link callback and only afterwards notifies about going to the background, and in that gap the game has already filled the swapchain and is stuck at "before acquiring the next texture, wait for its previous present to be processed"
 // (hle_nvn.c nvnWindowAcquireTexture -> mtl_present_wait). Without clearing, the game cannot advance a single tick during those 2.5 seconds of waiting for the save, and the save is not written (the same pattern three times in player logs: 3 frames queued, 0 submits)
-void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if (on) present_drop_for_suspend(); }
+void mtl_present_discard(int on) {
+    atomic_store(&g_present_discard, on != 0);
+    if (on) present_drop_for_suspend();
+    pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+}
 /* TOTK_MFX: at the game's present (game thread; this frame's submission is committed, the next one not yet started):
    remember the presented texture for the canvas search, encode motion vectors and the interpolated frame between the
    previous and this frame in a command buffer of its own (GPU order: after this frame, before the next), reset the
@@ -23183,6 +23310,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         d0 = g_stat_draw; c0 = c;
         g_fl_passes[0] = 0; g_fl_npass = 0; g_fl_cam_pass = -1; g_fl_cam_fov = -1; g_fl_body = 0; g_fl_body_any = 0; g_fl_allpass = 0; g_fl_t1 = 0;
     }
+    if (g_present_apple5 && (mfx_enabled() || mfxup_enabled() || vr_enabled())) {
+        if (!atomic_load(&g_present_discard)) MLOG("【红】Apple5 present does not support the active MetalFX/VR output mode; no MTL4 present was submitted");
+        return 0;
+    }
     if (g_vr_cam_taken && !mfx_enabled()) { g_vr_cam_taken = 0; g_mfx.want_cam = 0; }
     int discard = atomic_load(&g_present_discard), islot = mfx_enabled() && t ? mfx_present_frame(t, period, discard) : -1;
     if (mfx_latch() && !mfx_enabled()) { g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0; BOTW_MFX_FRAME_RESET() }   // key 2 / flag mfx_interp: the next frame is fully on or off
@@ -23204,37 +23335,57 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         if (st == 1 && link_on() && now - t0 >= at) { st = 2; mtl_link_pause(1); MLOG("DM_TEST_LINK_STALL：暂停显示节拍 %.1f 秒（帧 %llu）", dur, (unsigned long long)atomic_load(&g_cur_frame)); }
         else if (st == 2 && now - t0 >= at + dur) { st = 3; mtl_link_pause(0); MLOG("DM_TEST_LINK_STALL：放开显示节拍（帧 %llu）", (unsigned long long)atomic_load(&g_cur_frame)); }
     }
-    int ring = -1;
-    id<MTLTexture> rsrc = t && pring_on() && link_on() && islot < 0 && !mfx_enabled() && !nogpu() ? tex_mtl(t) : nil;
+    int ring = -1; uint64_t producer_fence = 0;
+    id<MTLTexture> rsrc = t && (g_present_apple5 || (pring_on() && link_on())) && islot < 0 && !mfx_enabled() && !nogpu() ? tex_mtl(t) : nil;
+    if (g_present_apple5 && !nogpu() && (!rsrc || rsrc.textureType != MTLTextureType2D || rsrc.sampleCount != 1)) {
+        MLOG("【红】Apple5 classic present requires a 2D single-sample source snapshot; source %s (%lux%lu, type %lu, samples %lu)",
+             rsrc ? "unsupported" : "missing", (unsigned long)rsrc.width, (unsigned long)rsrc.height,
+             (unsigned long)rsrc.textureType, (unsigned long)rsrc.sampleCount);
+        return 0;
+    }
     if (rsrc && rsrc.textureType == MTLTextureType2D && rsrc.sampleCount == 1) {
-        pthread_mutex_lock(&g_pq_mu);
-        for (int i = 0; i < PRING_N && ring < 0; i++) if (g_pring_tk[i] <= g_pq_read && !g_pring_busy[i]) ring = i;
-        if (ring >= 0) g_pring_tk[ring] = UINT64_MAX;   // being filled
-        pthread_mutex_unlock(&g_pq_mu);
-        if (ring < 0) g_pring_full++;
+        if (g_present_apple5) ring = present_ring_reserve();
         else {
+            pthread_mutex_lock(&g_pq_mu);
+            for (int i = 0; i < PRING_N && ring < 0; i++) if (g_pring_tk[i] <= g_pq_read && !g_pring_busy[i]) ring = i;
+            if (ring >= 0) g_pring_tk[ring] = UINT64_MAX;   // being filled
+            pthread_mutex_unlock(&g_pq_mu);
+            if (ring < 0) g_pring_full++;
+        }
+        if (ring < 0) {
+            if (g_present_apple5 && !atomic_load(&g_present_discard))
+                MLOG("【红】Apple5 classic present could not reserve an immutable source snapshot");
+            if (g_present_apple5) return 0;
+        } else {
             id<MTLTexture> r = g_pring[ring];
             nvn_ring_region rr = nvn_ring_region_for(rsrc.width, rsrc.height, pring_whole() ? NULL : crop);   // the picture the display shows, not the whole window image
             if (!r || r.width != rr.w || r.height != rr.h || r.pixelFormat != rsrc.pixelFormat) {
                 if (r) { res_remove(r); defer_obj_release(r); }
                 MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:rsrc.pixelFormat width:rr.w height:rr.h mipmapped:NO];
                 d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-                r = [g_dev newTextureWithDescriptor:d]; if (!r) MDIE("present ring texture %zux%zu", rr.w, rr.h);
+                r = [g_dev newTextureWithDescriptor:d]; if (!r) { present_ring_release_reservation(ring); MDIE("present ring texture %zux%zu", rr.w, rr.h); }
                 r.label = [NSString stringWithFormat:@"present ring %d", ring]; res_add(r); g_pring[ring] = r;
             }
             g_pring_pic[ring] = rr.picture;
             mtl_sub_begin();
             id<MTL4ComputeCommandEncoder> b = blit();
+            if (!b) { present_ring_release_reservation(ring); MDIE("Apple5 source snapshot encoder allocation failed after mtl_sub_begin"); }
             enc_b_copy_texture(b, rsrc, 0, 0, MTLOriginMake(rr.x, rr.y, 0), MTLSizeMake(rr.w, rr.h, 1), r, 0, 0, MTLOriginMake(0, 0, 0));
             enc_b_end(g_blit); g_blit = nil;
-            mtl_sub_commit();
+            producer_fence = mtl_sub_commit();
             if (++g_pring_n == 1 || g_pring_n % 3600 == 0) MLOG("[present-ring] %llu presents copied (no free slot %llu times); this one %zux%zu at %zu,%zu of the %lux%lu window image",
                                                                 (unsigned long long)g_pring_n, (unsigned long long)g_pring_full, rr.w, rr.h, rr.x, rr.y, (unsigned long)rsrc.width, (unsigned long)rsrc.height);
         }
     }
     pthread_mutex_lock(&g_pq_mu);
-    while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // 队满才等；正常由 AcquireTexture 先挡住 | Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), islot, 0, 0, ring};
+    while (g_pq_in - g_pq_done >= PQ && !atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // 队满才等；正常由 AcquireTexture 先挡住 | Wait only when the queue is full; normally AcquireTexture blocks first
+    if (atomic_load(&g_present_discard)) {
+        if (ring >= 0 && g_pring_tk[ring] == UINT64_MAX) g_pring_tk[ring] = g_pq_read;
+        pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); return 0;
+    }
+    if (!producer_fence) producer_fence = __atomic_load_n(&g_fence, __ATOMIC_ACQUIRE);
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){.t = *t, .period = period, .frame = atomic_load(&g_cur_frame), .producer_fence = producer_fence,
+        .t_in = CACurrentMediaTime(), .interp = islot, .ring = ring};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // 当帧状态随票号入队，不在出图线程晚读可变window | The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     eye_note_present(t, crop);   // stereo replay: which textures the game presents, and the picture's rectangle

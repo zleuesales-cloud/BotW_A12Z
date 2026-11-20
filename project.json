@@ -1,5 +1,5 @@
 {
-  "status": "BotW upstream and build dependencies imported; CPU target patched; GPU port incomplete",
+  "status": "classic Present component validated on Mac; full A12Z renderer and discrete shader compiler integration incomplete",
   "target": {
     "model": "iPad8,9",
     "game": "BOTW 1.9.0 + DLC",
@@ -79,5 +79,18 @@
     },
     "upstream_submission_guard": "upstream defaults to no game GPU submission after documented driver panics; retained, not used as successful GPU execution",
     "installed_mac_provenance_commit": "7a158084c306e8ea348a95c5cefe029b9bb03690"
+  },
+  "present": {
+    "status": "classic Apple5 component implemented; main replay and initialization still require migration",
+    "source_ownership": "immutable ring snapshot; exact per-picture committed producer fence; lease released on GPU completion",
+    "validation_reported_by": "lunna_max (GPT-6 Luna, max)",
+    "tests": {
+      "present_ring_pacing_and_gpu_crop": 9,
+      "gpu_completion": 1,
+      "feedback_lifetime_with_negative_control": 1
+    },
+    "ios_compile": "arm64-apple-ios26.0 -mcpu=apple-a12; nvn_mtl.m object",
+    "object_sha256": "cdbe24940653125b481b20d77e98849b846324fa49aa9fd47597cf057bbfed6a",
+    "target_device_gameplay": "not tested"
   }
 }
