@@ -262,7 +262,16 @@ totk_vpool_address_status totk_vpool_resolve(uintptr_t va, uint64_t len, totk_vp
     uintptr_t end = va + (uintptr_t)len;
     pthread_mutex_lock(&g_map_mu);
     const vpool_range *range = vpool_find_address_locked(va);
-    if (!range) { pthread_mutex_unlock(&g_map_mu); return TOTK_VPOOL_ADDRESS_NORMAL; }
+    if (!range) {
+        size_t lo = 0, hi = g_nvpools;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (g_vpools[mid].hi <= va) lo = mid + 1; else hi = mid;
+        }
+        int overlaps_virtual = lo < g_nvpools && g_vpools[lo].lo < end;
+        pthread_mutex_unlock(&g_map_mu);
+        return overlaps_virtual ? TOTK_VPOOL_ADDRESS_NONCONTIGUOUS : TOTK_VPOOL_ADDRESS_NORMAL;
+    }
     size_t i = vmap_find_address_locked(va);
     if (i == g_nvmap) { pthread_mutex_unlock(&g_map_mu); return TOTK_VPOOL_ADDRESS_UNMAPPED; }
     const vmap_ent *first = &g_vmap[i];

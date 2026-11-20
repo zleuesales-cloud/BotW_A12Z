@@ -147,7 +147,7 @@ static void stor_alias_collect(void) {
 static stor_alias_heap *stor_alias_heap_new_locked(MTLTextureDescriptor *d, stor_alias_key k, uint64_t lo, uint64_t size, int region) {
     MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
     hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.cpuCacheMode = d.cpuCacheMode;
-    hd.hazardTrackingMode = MTLHazardTrackingModeUntracked;   // MTL4 queues order work by explicit barriers, as for device textures
+    hd.hazardTrackingMode = nvn_heap_hazard_mode();   // Apple5 classic encoders require tracked heap aliases; MTL4 keeps explicit barriers
     hd.size = size;
     id<MTLHeap> heap = rt_heap_on() ? rt_heap_take(d, size, 1) : nil;
     if (!heap) heap = [g_dev newHeapWithDescriptor:hd];

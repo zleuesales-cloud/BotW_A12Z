@@ -113,13 +113,20 @@ int main(void) {
         adjacent_base[i] = (uintptr_t)adjacent[i].mem;
     }
     int left = -1, right = -1;
-    for (int i = 0; i < ADJACENT_CANDIDATES && left < 0; i++)
+    for (int i = 0; i < ADJACENT_CANDIDATES && left < 0; i++) {
+        int has_predecessor = 0;
+        for (int k = 0; k < ADJACENT_CANDIDATES; k++)
+            if (adjacent_base[k] <= UINTPTR_MAX - PAGE && adjacent_base[k] + PAGE == adjacent_base[i]) has_predecessor = 1;
+        if (has_predecessor) continue;
         for (int j = 0; j < ADJACENT_CANDIDATES; j++)
             if (adjacent_base[i] <= UINTPTR_MAX - PAGE && adjacent_base[i] + PAGE == adjacent_base[j]) { left = i; right = j; break; }
+    }
     CHECK(left >= 0);
     CHECK(map_range(&adjacent[left], &a, 0, 0, PAGE));
     CHECK(map_range(&adjacent[right], &a, PAGE, 0, PAGE));
     totk_vpool_address cross = {0};
+    CHECK(adjacent_base[left] > 0);
+    CHECK(totk_vpool_resolve(adjacent_base[left] - 1, 2, NULL) == TOTK_VPOOL_ADDRESS_NONCONTIGUOUS);
     CHECK(totk_vpool_resolve(adjacent_base[left], 2 * PAGE, &cross) == TOTK_VPOOL_ADDRESS_NONCONTIGUOUS);
     CHECK(cross.contiguous == PAGE);
     CHECK(totk_vpool_fini(&adjacent[left]) == 1);

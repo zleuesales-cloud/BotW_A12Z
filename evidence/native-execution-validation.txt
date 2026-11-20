@@ -1,0 +1,13 @@
+Apple5 native execution checkpoint
+Executor: lunna_max (requested GPT-6 Luna, max); parent reviewed init/submission/encoder/lookup paths and reran tests.
+Command: python3 -m unittest upstream.tests.test_native_main_encoders upstream.tests.test_vpool_mapping_table -v
+Result: 2 PASS. Mac GPU probe extracts production native render/blit/fence helpers and mtl_addr, links production totk_vpool.c.
+Covers upload/readback, native render-pass clear/readback, untracked heap alias reuse and exact physical owner buffer selection despite overlapping decoy pool.
+Original distinct no-copy-wrapper chain failed (byte512 got0 expected7). Canonical resource identity fixes the production test, which spans three same-queue command buffers without intermediate CPU waits.
+Unmapped and partial virtual intersection fatal cases cannot fall back to virtual wrappers.
+Apple5 main/upload use native g_q; final event signal is encoded in command buffer; native fence chain preserves encoder ordering across splits.
+Init avoids MTL4 queue/allocator/argument tables and residency allocation. CPU BC decode/deswizzle selected; unvalidated ASTC/EAC transcode disabled on Apple5.
+Current reachable submit/copy/clear/ReadTexels/WriteTexels consumers keep existing outer synchronous replay section through encoding; map/finalize hold same section. Nested mtl_addr lookup lock alone does not guarantee post-return lifetime.
+Executor reports arm64-apple-ios26.0 apple-a12 object compile PASS; 55 warnings remain.
+Not complete game renderer: discrete draw/compute binder and segmented cross-mapping operations remain explicit failures.
+No iPad install, game picture, FPS or soak validation.

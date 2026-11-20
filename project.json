@@ -1,5 +1,5 @@
 {
-  "status": "classic Present component validated on Mac; full A12Z renderer and discrete shader compiler integration incomplete",
+  "status": "classic Apple5 main submission, clear/blit and alias canonicalization checkpoint validated on Mac; game shader binder and iPad app integration incomplete",
   "target": {
     "model": "iPad8,9",
     "game": "BOTW 1.9.0 + DLC",
@@ -71,7 +71,7 @@
     "latest_parser_test": "pass: parent verified AB compatibility and opt-in discrete validation fixture; full legacy corpus not rerun after this change"
   },
   "gpu_submission": {
-    "status": "shared completion and classic submission integrated; game command creation and encoders not migrated",
+    "status": "classic Apple5 init/main begin/split/final/upload and native clear/blit integrated; game draw/compute fail explicitly pending matching native binder",
     "tests": {
       "classic_gpu_fill_readback": "pass on Mac; not an iPad gameplay test",
       "callback_snapshot_order_and_rejection": "pass",
@@ -140,9 +140,19 @@
     "device_gameplay": "not tested"
   },
   "virtual_pool_mapping": {
-    "status": "checked mapping metadata implemented; canonical Metal resource lookup not yet integrated",
+    "status": "Apple5 canonical physical-buffer lookup integrated; noncontiguous segmented operations explicitly unsupported pending implementation",
     "validation": "CPU mapping test passed, including 600 mappings, partial overlap/unmap, adjacent virtual pools, finalize/address reuse and overflow; parent reran; independent Luna review passed for default synchronous mode",
     "configuration": "sync replay required for production lookup; Apple5 async rejection must accompany native activation",
-    "gpu_alias_chain": "still failing with distinct no-copy buffer wrappers; canonicalization pending"
+    "gpu_alias_chain": "PASS on Mac: production lookup selects exact owner buffer; dependent alias copies cross three command buffers without intermediate CPU waits"
+  },
+  "native_execution_checkpoint": {
+    "validation": "parent reran production native GPU helper and vpool CPU tests: 2 pass; executor A12 object compile pass",
+    "configuration": "Apple5 synchronous replay; async explicitly rejected",
+    "limitations": [
+      "game draw/compute discrete binder not integrated",
+      "segmented cross-mapping copies not implemented and fail explicitly",
+      "55 compile warnings remain",
+      "not installed or validated on target iPad"
+    ]
   }
 }

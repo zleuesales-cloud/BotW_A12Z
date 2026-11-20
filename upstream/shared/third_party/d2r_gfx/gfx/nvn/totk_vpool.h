@@ -23,7 +23,7 @@ int totk_vpool_fini(pool_t *pool);
 // All requests are validated before any mapping changes; returns 0 and leaves mappings intact on failure.
 int totk_vpool_map(pool_t *virtual_pool, int count, const totk_mapping_request *requests);
 typedef enum {
-    TOTK_VPOOL_ADDRESS_NORMAL = 0,       // not inside a registered virtual pool
+    TOTK_VPOOL_ADDRESS_NORMAL = 0,       // the full query range is outside registered virtual pools
     TOTK_VPOOL_ADDRESS_MAPPED = 1,       // requested range resolves to one physical-pool buffer span
     TOTK_VPOOL_ADDRESS_UNMAPPED = 2,     // starts in a virtual pool but includes an unmapped page
     TOTK_VPOOL_ADDRESS_NONCONTIGUOUS = 3,// mapped pages cross physical-pool/offset boundaries
@@ -38,6 +38,7 @@ typedef struct {
 } totk_vpool_address;
 // Query metadata only; callers that then resolve a Metal pool must hold the NVN replay section
 // across this query and pool lookup so MapVirtual/Finalize cannot replace the pool underneath it.
+// NORMAL means the whole range is outside virtual pools; any partial intersection is NONCONTIGUOUS.
 totk_vpool_address_status totk_vpool_resolve(uintptr_t va, uint64_t len, totk_vpool_address *out);
 // Compatibility helper for diagnostics: true only when the full range maps contiguously.
 int totk_vpool_backing(uintptr_t va, uint64_t len, uintptr_t *cpu);

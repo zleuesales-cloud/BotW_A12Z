@@ -59,7 +59,7 @@ static id<MTLHeap> rt_heap_take(MTLTextureDescriptor *d, uint64_t bytes, int exa
     for (unsigned i = 0; i < g_rt_heap_n; i++) {
         rt_heap_spare *e = &g_rt_heaps[i]; id<MTLHeap> h = (__bridge id<MTLHeap>)e->heap;
         if (e->bytes < bytes || e->bytes - bytes > (exact ? 0 : bytes / 8) ||
-            h.storageMode != d.storageMode || h.cpuCacheMode != d.cpuCacheMode ||
+            h.storageMode != d.storageMode || h.cpuCacheMode != d.cpuCacheMode || h.hazardTrackingMode != nvn_heap_hazard_mode() ||
             (best < g_rt_heap_n && e->bytes >= g_rt_heaps[best].bytes)) continue;
         best = i;
     }
@@ -78,7 +78,7 @@ static id<MTLTexture> rt_heap_texture(MTLTextureDescriptor *d) {
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d]; if (!need.size) return nil;
     id<MTLHeap> h = rt_heap_take(d, need.size, 0);
     if (!h) { MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = need.size;
-        hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = nvn_heap_hazard_mode();
         h = [g_dev newHeapWithDescriptor:hd]; if (h) { pthread_mutex_lock(&g_rt_heap_mu); g_rt_heap_made++; pthread_mutex_unlock(&g_rt_heap_mu); } }
     if (h) res_add((id<MTLResource>)h); // heap textures themselves are skipped by res_add
     id<MTLTexture> t = h ? [h newTextureWithDescriptor:d offset:0] : nil;
