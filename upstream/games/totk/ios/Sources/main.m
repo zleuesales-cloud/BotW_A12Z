@@ -29,6 +29,7 @@ void runtime_ios_sync_drawable(UIView *host);
 void runtime_ios_sync_safe_area(UIView *host);
 static char *host_argv[3];
 static BOOL outputResolutionFromEnvironment;
+static BOOL g_probe_copy_alias;
 static NSString *g_no_game_data;   // set when there is no RomFS image to play from (didFinishLaunching)
 static NSString *g_seed_pack, *g_seed_unpack_to;   // a pushed shader pack to unpack before the game starts (seed_unpack)
 static NSString *g_seed_dir;       // the startup shaders' folder (game_data_ready): the app's own, or the one pushed
@@ -308,6 +309,7 @@ static BOOL g_switch_size;
 /* What follows the game data's check before the game starts: the save folder question, the shader question, then the
    start itself (prepareAndStart). */
 - (void)startAfterChecks {
+    if (g_probe_copy_alias) { [self prepareAndStart]; return; }
     cloud_folder_forget_if_asked();
     if (g_pick_cloud_folder || [NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_CLOUD_SAVE_PICK"]) {
         __weak TOTKGameController *weakSelf = self;
@@ -451,7 +453,7 @@ static void contrib_settings_sync(NSString *contrib) {
     [self startGame];
 }
 - (void)startGame {
-    cloud_folder_apply();   // before the game thread: fs_host.c init reads TOTK_CLOUD_SAVE_FOLDER
+    if (!g_probe_copy_alias) cloud_folder_apply();   // before the game thread: fs_host.c init reads TOTK_CLOUD_SAVE_FOLDER
     /* Playback category (PR #97): plays with the ring / silent switch off and routes to the speaker. Without an active
        session the game's CoreAudio output stays on a null sink on iOS 27 ("no device sink in use"); activating it in
        didFinishLaunching blocked the main thread before the log file was opened. Interruptions: audio_observe. */
@@ -709,14 +711,19 @@ static void apply_settings(void) {
 }
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)options;
+    const char *probe = getenv("TOTK_IOS_PROBE");
+    if (probe && strncmp(probe, "probe", 5)) { fprintf(stderr,"invalid TOTK_IOS_PROBE\n"); abort(); }
+    g_probe_copy_alias = probe && !strcmp(probe, "probe-gpu-copy-alias");
     // Controller input does not reset the idle timer; auto-lock would suspend the game mid-play or mid shader import.
     application.idleTimerDisabled = YES;
     audio_observe();
+    if (!g_probe_copy_alias) {
 #ifdef GAME_INBOX_ID   /* the day's report of active players (mng_active.h; off in the Settings app's pane) */
     mng_active_start(@GAME_INBOX_ID, mng_active_version());
 #else
     mng_active_start(@"totk", mng_active_version());
 #endif
+    }
     /* The Mac launcher passes the preferred language as TOTK_LOCALE (PR #97); "zh-Hans-CN" maps to zh-Hans in services.c. */
     NSString *preferred = NSLocale.preferredLanguages.firstObject;
     if (preferred.length) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
@@ -739,7 +746,7 @@ static void apply_settings(void) {
     /* The 17 GB image may live in Documents/GameData instead of the app (romfs.bin or romfs.bin.000, ...; ios/tools/
        install_device.py --game-data puts it there): a new build then installs without it, and reinstalling keeps it.
        Excluded from iCloud backups. The runtime still hashes it once against the build's pin (TOTK_ROMFS_PROOF_DIR). */
-    g_no_game_data = game_data_ready(docs, res);   // the game data and the shaders, or what is missing (and waited for)
+    g_no_game_data = g_probe_copy_alias ? nil : game_data_ready(docs, res);   // the standalone copy probe needs no ROMFS or shader seed
     if (g_no_game_data) fprintf(stderr, "[totk] not ready to start: %s\n", g_no_game_data.UTF8String);
     NSString *seedDir = g_seed_dir ?: [res stringByAppendingPathComponent:@"shader-seed"];   // set again once ready
 #if TARGET_OS_VISION
@@ -773,6 +780,7 @@ static void apply_settings(void) {
     if (testCache && *testCache && !strstr(testCache, "..")) cache = [docs stringByAppendingPathComponent:@(testCache)];
     [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("TOTK_SHADER_CACHE",cache.fileSystemRepresentation,1);
+    if (!g_probe_copy_alias) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         NSFileManager *files = [NSFileManager new]; NSUInteger removed = 0;
         for (NSString *name in [files contentsOfDirectoryAtPath:cacheRoot error:nil] ?: @[]) {
@@ -781,10 +789,12 @@ static void apply_settings(void) {
         }
         if (removed) fprintf(stderr,"[shader-cache] removed %lu entries of earlier translation chains\n",(unsigned long)removed);
     });
+    }
     // Shaders the shared list lacks (totk_shader_contrib.h), in the Files app for players who want to send them; only the Mac asks.
     // What this app's seed and warm lists (beside the seed: DM_NVN_SHMAP) serve leaves it first, so the Mac sends only the rest.
-    NSString *contrib = totk_inbox_claim([docs stringByAppendingPathComponent:@"shader-list-contribution.txt"]);   // this game's file only
+    NSString *contrib = g_probe_copy_alias ? nil : totk_inbox_claim([docs stringByAppendingPathComponent:@"shader-list-contribution.txt"]);   // this game's file only
     g_contrib = contrib;
+    if (!g_probe_copy_alias) {
     if (!g_no_game_data) totk_contrib_prune(contrib, seedDir, seedDir);   // else once the shaders are there (waitForGameData)
     setenv("TOTK_SHADER_CONTRIB",contrib.fileSystemRepresentation,1);
     contrib_settings_sync(contrib);
@@ -794,6 +804,7 @@ static void apply_settings(void) {
         usingBlock:^(NSNotification *n) { (void)n; contrib_settings_sync(contrib); totk_inbox_start(contrib, @"ios"); }];
     // ... with the game and version it came from, so the file names them
     setenv("TOTK_CONTRIB_GAME",GAME_FOLDER " " TOTK_GAME_VERSION,1);
+    }
     setenv("DM_NVN_SHMAP",[seedDir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation,1);
     setenv("DM_MSL_DIR",seedDir.fileSystemRepresentation,1);
     NSString *font = [res stringByAppendingPathComponent:@"font"]; setenv("TOTK_FONT_DIR",font.fileSystemRepresentation,1);
@@ -816,8 +827,7 @@ static void apply_settings(void) {
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_TOUCH_WITH_KEYBOARD"]) setenv("TOTK_TOUCH_WITH_KEYBOARD", "1", 0);
     unsetenv("TOTK_AUTOLOAD");
     chdir(docs.fileSystemRepresentation);
-    const char *probe = getenv("TOTK_IOS_PROBE");
-    if (probe && strncmp(probe, "probe", 5)) { fprintf(stderr,"invalid TOTK_IOS_PROBE\n"); abort(); }
+    if (g_probe_copy_alias) setenv("TOTK_START_SCREEN", "0", 1);
     host_argv[0] = strdup("TOTK"); host_argv[1] = strdup(res.fileSystemRepresentation); host_argv[2] = strdup(probe ? probe : "boot");
     return YES;   // the window is made when the window scene connects (TOTKSceneDelegate)
 }
