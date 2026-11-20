@@ -78,7 +78,20 @@
       "ios_a12_objects": "nvn_mtl.m and nvn_completion.m compiled"
     },
     "upstream_submission_guard": "upstream defaults to no game GPU submission after documented driver panics; retained, not used as successful GPU execution",
-    "installed_mac_provenance_commit": "7a158084c306e8ea348a95c5cefe029b9bb03690"
+    "installed_mac_provenance_commit": "7a158084c306e8ea348a95c5cefe029b9bb03690",
+    "ordered_completion": {
+      "status": "implemented; parent reviewed",
+      "scope": "per native command queue; sequence allocation matches helper-owned commit order",
+      "ownership": "errors/handlers retained until contiguous delivery; explicit autorelease pools",
+      "validation_reported_by": "lunna_max (GPT-6 Luna, max)",
+      "tests": [
+        "reversed completion arrival and queue independence",
+        "pre-enqueued/repeated submission rejection without sequence holes",
+        "two-command-buffer GPU fill/readback",
+        "feedback lifetime positive and negative controls"
+      ],
+      "ios_a12_compile": "nvn_mtl.m and nvn_completion.m passed"
+    }
   },
   "present": {
     "status": "classic Apple5 component implemented; main replay and initialization still require migration",

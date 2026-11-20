@@ -24,6 +24,10 @@ int main(void) { @autoreleasepool {
     id<MTLCommandQueue> queue = [device newCommandQueue]; assert(queue);
     id<MTLBuffer> output = [device newBufferWithLength:4096 options:MTLResourceStorageModeShared]; assert(output);
     memset(output.contents, 0, output.length);
+    id<MTLCommandBuffer> externally_enqueued = [queue commandBuffer]; assert(externally_enqueued);
+    [externally_enqueued enqueue];
+    assert(!nvn_submit_classic(externally_enqueued, @[])); // External enqueue order is not assigned a helper sequence.
+    [externally_enqueued commit]; // Rejected helper submissions still need the caller to drain their queue slot.
     id<MTLCommandBuffer> cb = [queue commandBuffer]; assert(cb && cb.retainedReferences);
     assert([cb conformsToProtocol:@protocol(MTLCommandBuffer)]);
     if ([device supportsFamily:MTLGPUFamilyMetal4]) {
@@ -33,21 +37,33 @@ int main(void) { @autoreleasepool {
     id<MTLSharedEvent> gate = [device newSharedEvent]; assert(gate);
     [cb encodeWaitForEvent:gate value:1];
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder]; assert(blit);
-    [blit fillBuffer:output range:NSMakeRange(0, output.length) value:0x5a]; [blit endEncoding];
+    [blit fillBuffer:output range:NSMakeRange(0, output.length / 2) value:0x5a]; [blit endEncoding];
+    id<MTLCommandBuffer> cb2 = [queue commandBuffer]; assert(cb2);
+    id<MTLBlitCommandEncoder> blit2 = [cb2 blitCommandEncoder]; assert(blit2);
+    [blit2 fillBuffer:output range:NSMakeRange(output.length / 2, output.length / 2) value:0xa5]; [blit2 endEncoding];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    __block int completed = 0;
+    dispatch_semaphore_t done2 = dispatch_semaphore_create(0);
+    __block int completed = 0, queue_order = 0;
     NSMutableArray *handlers = [NSMutableArray arrayWithObjects:
-        ^(nvn_gpu_result r) { assert(!r.error && r.GPUEndTime >= r.GPUStartTime); completed++; },
+        ^(nvn_gpu_result r) { assert(!r.error && r.GPUEndTime >= r.GPUStartTime); assert(queue_order == 0); queue_order = 1; completed++; },
         ^(nvn_gpu_result r) { assert(completed == 1); dispatch_semaphore_signal(done); }, nil];
+    NSArray *handlers2 = @[
+        ^(nvn_gpu_result r) { assert(!r.error && queue_order == 1); queue_order = 2; dispatch_semaphore_signal(done2); }
+    ];
     assert(!nvn_submit_classic(nil, handlers));
     assert(nvn_submit_classic(cb, handlers));
     assert(!nvn_submit_classic(cb, handlers));
-    [handlers removeAllObjects]; // Submission owns its immutable callback snapshot.
+    assert(nvn_submit_classic(cb2, handlers2));
+    [handlers removeAllObjects]; // Submission owns immutable callback snapshots.
     gate.signaledValue = 1;
     assert(!dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10*NSEC_PER_SEC)));
+    assert(!dispatch_semaphore_wait(done2, dispatch_time(DISPATCH_TIME_NOW, 10*NSEC_PER_SEC)));
+    assert(queue_order == 2);
     assert(cb.status == MTLCommandBufferStatusCompleted);
+    assert(cb2.status == MTLCommandBufferStatusCompleted);
     const unsigned char *bytes = output.contents;
-    for (NSUInteger i=0; i<output.length; i++) assert(bytes[i] == 0x5a);
+    for (NSUInteger i=0; i<output.length / 2; i++) assert(bytes[i] == 0x5a);
+    for (NSUInteger i=output.length / 2; i<output.length; i++) assert(bytes[i] == 0xa5);
 } }
 '''
         with tempfile.TemporaryDirectory() as folder:

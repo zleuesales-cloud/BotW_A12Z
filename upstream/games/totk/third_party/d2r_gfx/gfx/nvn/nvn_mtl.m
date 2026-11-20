@@ -323,7 +323,7 @@ static void q4_commit(id cb, TotkCommitOptions *o) {
     }
     nvn_gpu_complete(o->handlers, (nvn_gpu_result){0});
 }
-static void cb_commit(id<MTLCommandBuffer> cb) { bg_gate(); if (!nogpu()) [cb commit]; }
+static void cb_commit(id<MTLCommandBuffer> cb) { bg_gate(); if (!nogpu() && !nvn_submit_classic(cb, @[])) MDIE("GPU command buffer already submitted"); }
 static void cb_wait(id<MTLCommandBuffer> cb) { if (!nogpu()) [cb waitUntilCompleted]; }
 static id g_cb; // also inspected under the replay lock by idle retirement
 static uint64_t g_fence;                        // 已提交的最大栅栏值（提交线程独占递增） | Highest committed fence value (incremented exclusively by the submit thread)

@@ -1,0 +1,4 @@
+Parent reviewed the isolated per-queue completion-order patch.
+Executor lunna_max reported: python3 -m unittest upstream.tests.test_classic_completion_order upstream.tests.test_gpu_completion upstream.tests.test_feedback_lifetime: 3 passed; lifetime negative-control failure expected.
+iOS arm64/apple-a12 object compilation of nvn_mtl.m and nvn_completion.m passed.
+No full-game or iPad runtime validation; main native execution migration is still outstanding.
