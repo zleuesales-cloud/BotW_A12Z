@@ -1,0 +1,1 @@
+{"status":"pass","probe":"probe-gpu-copy-alias","checked":524288,"scope":"production buffer copies and fills through two no-copy buffers over one allocation and a virtual pool's view, 256 dependent steps over 64 KiB across encoder boundaries, match a CPU replay byte for byte"}

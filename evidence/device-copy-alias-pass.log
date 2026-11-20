@@ -1,0 +1,34 @@
+[totk] settings: 17 defaults from /var/containers/Bundle/Application/1B729CF5-30A4-4434-9770-467930E3E5EB/TOTK.app/Settings.bundle/Root.plist
+[totk] settings: picture profile (handed over at game start); drawable default, scene default, hz -, phone -, overlays 1/1, taa 0, mfx 1/0
+[totk] view drawable 1280x894 (screen scale 2.0, TOTK_IOS_DRAWABLE_H=720)
+[dm] [nvn-mtl] [hud] 安全区：两侧 0 像素、底部 23 像素（画布 1280x894），角上的提示框避开它
+[totk] picture: profile custom, metalfx off; docked, scene 1600x900, taa 0, 30 fps, Switch size 0, drawable 1080
+[totk] phone frame rate: held at 30
+[totk] view drawable 1920x1341 (screen scale 2.0, TOTK_IOS_DRAWABLE_H=1080)
+[dm] [nvn-mtl] [hud] 安全区：两侧 0 像素、底部 35 像素（画布 1920x1341），角上的提示框避开它
+[totk-audio] audio session category=AVAudioSessionCategoryPlayback active=1 route=Speaker err=none
+[totk] game tables /private/var/containers/Bundle/Application/1B729CF5-30A4-4434-9770-467930E3E5EB/TOTK.app/GameData/game-data/runtime-tables.bin: 3 modules, main 225615 subsdk0 19073 sdk 34059 relocations
+[totk] mapped embedded main at 0x11faa4000 size=34258944 symbols=510
+[totk] mapped embedded subsdk0 at 0x121b50000 size=7159808 symbols=10111
+[totk] mapped embedded sdk at 0x122224000 size=14417920 symbols=23066
+[botw] 1.9.0 game-code patches
+[botw] docked render size 1600x900 into the 1920x1080 canvas (custom; TOTK_RENDER_RES)
+[botw] scene 1600x900 is above this mode's 1280x720 canvas; 1280x720 here
+[botw] handheld render size 1280x720, the game's own upscale to the 1280x720 canvas (phone; custom, TOTK_RENDER_RES)
+[botw] ultrawide: the settings panel picks 16:9 / 16:10 / 21:9 / 32:9, starts at 16:9 (2.3333)
+[botw] screen shape 1.4318: the game's 16:9
+[botw] real-time frame step: the VFR ratio, one interval-stepped fade and the UI animation step follow the measured frame time, physics keeps six substeps a frame (8 instructions, 27 verified); initial 33.33 ms, sampled at each present (TOTK_REALTIME=0: as shipped)
+[botw] pad repeat and hold counts by real time: held buttons count the VFR ratio per frame (2 instructions, 5 verified; TOTK_PAD_REPEAT=0: one per frame, as shipped)
+[botw] camera blends start with one 30 fps frame, then follow the measured ratio (veneer +0x15a1cc0; TOTK_BLEND_FIRST_STEP=0: as shipped)
+[botw] moving platforms: the turn angle is 2 atan2(|xyz|, |w|), small turns kept (veneer +0x15a1f70; TOTK_KF_ANGLE=0: as shipped)
+[botw] exclusive loads with acquire: set at build time (iOS), none left
+[totk-boot] 0.285 创建 Metal 图形设备 — 准备 GPU、命令队列和图形资源
+[dm] [nvn-mtl] Apple5 without Metal4: native g_q execution enabled; discrete-v1 shader binding is still required before game draws
+[dm] [nvn-mtl] Apple5 upload path: CPU deswizzle/copy selected; no Metal4 texture-conversion kernels will be used
+[dm] [nvn-mtl] Metal 设备 Apple A12Z GPU
+[totk-gfx] 脏页跟踪：销毁的池 0x10b894000 没有自己的跟踪区间，别的池的区间不动（累计 1 次）
+[dm] [nvn-mtl] TOTK: TBDR pass optimizations disabled; DM_NVN_TBDR=1 opts into experimental pass rewriting
+[dm] [nvn-mtl] TOTK: mid-submission commits on (first after 30 draws, then every 40 draws)
+[dm] [nvn-mtl] uniform 内容按提交时刻快照：开
+[dm] [nvn-mtl] 贴图副本可清除：开（闲置 ≥90 次提交的副本交给系统，缺内存时由系统回收；TOTK_TEX_PURGE=0 关）
+[dm] [nvn-mtl] 贴图副本淘汰：开（可用内存低于 250 MB 时淘汰久未使用的副本，直到 350 MB；TOTK_TEX_EVICT=0 关）

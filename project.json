@@ -190,11 +190,17 @@
     ]
   },
   "device_probe": {
-    "status": "same-ID update installed; first launch exited1 before probe pass, diagnosis pending",
+    "status": "PASS on physical iPad8,9 / Apple A12Z GPU",
     "bundle_id": "org.macnativegames.botw.a12z",
     "source_commit": "a8982c1",
     "device": "00008027-001C51D12262402E",
-    "gpu_validation": "no pass result yet",
-    "first_failure": "runtime startup patch validation: embedded main+0x1266114 d2a89408, expected exported d0007208; running tables/modules loaded; re-export/relink pending"
+    "gpu_validation": "real production native queue/copy/fill/canonical virtual-pool path; 524288 bytes checked; no GPU errors reported",
+    "first_failure": "runtime startup patch validation: embedded main+0x1266114 d2a89408, expected exported d0007208; running tables/modules loaded; re-export/relink pending",
+    "macho_uuid": "BC99A66F-31C3-389C-8C92-C61D6E5B7623",
+    "signed_binary_sha256": "d7160b873c9dff5594b21b76810b5148e5a79cd39ce005f0164e0ce2058400fa",
+    "exporter_sha256": "8785513ce424af1414316d5ef5493635162a6c3d19d03a060d4d4cf63229493c",
+    "first_failure_resolution": "rebuilt host exporter from same frozen source, regenerated embedded sections, verified d0007208/f9401508 in signed Mach-O; runtime checks retained",
+    "data_preservation": "pre/post RomFS and shader-seed small marker files byte-identical; no 15GB transfer",
+    "scope_limit": "Apple5 uses canonical one-buffer identity for physical/virtual mappings; original JSON scope mentions modern two-wrapper case; not game rendering/FPS/soak validation"
   }
 }
