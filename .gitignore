@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 游戏本体与版权资产（请由使用者自行准备）
+romfs/
+aoc/
+shared-fonts/
+shader-cache/
+shaders.bin
+
+# 构建与签名产物
+build/
+DerivedData/
+*.ipa
+*.mobileprovision
+*.p12
+*.nsp
+*.xci

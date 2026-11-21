@@ -186,8 +186,15 @@ static void capture_copy(Mixer *m,const float *src,int frames) {
    With the 512-frame (10.7 ms) device buffer, 20 ms leaves about 10 ms for a stall of the mixing thread (40 ms left about
    30 ms); 0 starts as soon as one device buffer is there.
    Returns -1 for a value that is not a number of milliseconds from 0 to 500. */
+#if TARGET_OS_IPHONE
+#define AUDIO_PREFILL_DEFAULT_BLOCKS 8
+#define AUDIO_PREFILL_DEFAULT_MS 40
+#else
+#define AUDIO_PREFILL_DEFAULT_BLOCKS 4
+#define AUDIO_PREFILL_DEFAULT_MS 20
+#endif
 static int prefill_blocks_for(const char *e) {
-    if (!e || !*e) return 4;
+    if (!e || !*e) return AUDIO_PREFILL_DEFAULT_BLOCKS;
     char *end; double ms = strtod(e, &end);
     if (end == e || *end || !(ms >= 0) || ms > 500) return -1;
     return (int)ceil(ms / 5.0);
@@ -196,7 +203,7 @@ static int prefill_blocks(void) {   // read once before the device starts (audio
     static int blocks = -2;
     if (blocks == -2) {
         const char *e = getenv("TOTK_AUDIO_PREFILL_MS"); int b = prefill_blocks_for(e);
-        if (b < 0) { fprintf(stderr, "[totk-audio] 【红】TOTK_AUDIO_PREFILL_MS=%s is not 0..500 ms: using 20\n", e); b = 4; }
+        if (b < 0) { fprintf(stderr, "[totk-audio] 【红】TOTK_AUDIO_PREFILL_MS=%s is not 0..500 ms: using %d\n", e, AUDIO_PREFILL_DEFAULT_MS); b = AUDIO_PREFILL_DEFAULT_BLOCKS; }
         fprintf(stderr, "[totk-audio] output starts after %d ms of queued audio (TOTK_AUDIO_PREFILL_MS%s)\n", b * 5, e && *e ? "" : ", default");
         blocks = b;
     }

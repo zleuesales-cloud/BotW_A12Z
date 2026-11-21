@@ -767,7 +767,9 @@ static void apply_settings(void) {
     setenv("TOTK_ROMFS_PATCHES_OUT",[res stringByAppendingPathComponent:@"romfs-patches-out"].fileSystemRepresentation,1);
     setenv("TOTK_SHARED_FONTS",[res stringByAppendingPathComponent:@"shared-fonts"].fileSystemRepresentation,1);
     NSString *aoc = [res stringByAppendingPathComponent:@"aoc"];   // Breath of the Wild's add-on content packs (build_ipa.py; runtime/aoc_romfs.c)
-    if ([fm fileExistsAtPath:aoc]) setenv("TOTK_AOC",aoc.fileSystemRepresentation,1);
+    NSString *docsAoc = [docs stringByAppendingPathComponent:@"GameData/aoc"];
+    if ([fm fileExistsAtPath:aoc]) setenv("TOTK_AOC",aoc.fileSystemRepresentation,0);
+    else if ([fm fileExistsAtPath:docsAoc]) setenv("TOTK_AOC",docsAoc.fileSystemRepresentation,0);
     setenv("TOTK_SHADER_SEED_DIR",seedDir.fileSystemRepresentation,1);
     /* One folder per translation chain, as on the Mac: the runtime refuses translations of another chain, and the seed
        import keeps files that are already there. Builds before the v5 chain (2026-10-20) kept them directly in
@@ -780,11 +782,12 @@ static void apply_settings(void) {
     if (testCache && *testCache && !strstr(testCache, "..")) cache = [docs stringByAppendingPathComponent:@(testCache)];
     [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
     setenv("TOTK_SHADER_CACHE",cache.fileSystemRepresentation,1);
+    NSString *discreteChainDir = [chainDir stringByAppendingString:@".discrete-v1"];
     if (!g_probe_copy_alias) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
         NSFileManager *files = [NSFileManager new]; NSUInteger removed = 0;
         for (NSString *name in [files contentsOfDirectoryAtPath:cacheRoot error:nil] ?: @[]) {
-            if ([name isEqualToString:chainDir]) continue;
+            if ([name isEqualToString:chainDir] || [name isEqualToString:discreteChainDir]) continue;
             if ([files removeItemAtPath:[cacheRoot stringByAppendingPathComponent:name] error:nil]) removed++;
         }
         if (removed) fprintf(stderr,"[shader-cache] removed %lu entries of earlier translation chains\n",(unsigned long)removed);

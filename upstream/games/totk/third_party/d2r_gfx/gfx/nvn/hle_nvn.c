@@ -3138,6 +3138,7 @@ static int uncapped_interval_on(void) {
 }
 static double g_rt_comp_ms;   // 当前声明的实时计算量（ms；0 = 未声明） | Currently declared real-time computation amount (ms; 0 = not declared)
 static double g_rt_period_ms;
+static double g_active_period_ms;   // 当前生效的出图目标间隔（ms；30 FPS 锁帧/间隔 2 时约 33.33 ms，60 FPS 时约 16.67 ms） | Currently active target present period (ms; ~33.33 ms at 30 FPS / interval 2, ~16.67 ms at 60 FPS)
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static unsigned present_ticks(const win_t *o);
@@ -3332,8 +3333,10 @@ static void tsummary(uint64_t frame) {
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // 帧间隔另起一行（M1 基线）：本窗口 > 16.7 ms 帧数与 p99 | frame interval gets its own line (M1 baseline): number of frames > 16.7 ms in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > 16.7;
         LOG("[nvn] 帧间隔 至帧 %llu：>16.7ms %u / %u 帧，p99 %.2f ms", frame, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
-    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // 上屏：掉帧 = 间隔 > 16.7 × 1.5 ms 或被丢弃 | on-screen present: dropped frame = interval > 16.7 × 1.5 ms or discarded
-      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > 25.0; } }
+    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // 上屏：掉帧 = 间隔 > 目标周期 × 1.5 ms（60 FPS 为 25.0 ms，30 FPS 为 50.0 ms）或被丢弃 | on-screen present: dropped frame = interval > target period × 1.5 ms (25.0 ms at 60 FPS, 50.0 ms at 30 FPS) or discarded
+      double target_ms = g_active_period_ms >= 25.0 ? g_active_period_ms : (g_rt_period_ms >= 25.0 ? g_rt_period_ms : 1000.0 / 60.0);
+      double drop_thr = target_ms * 1.5;
+      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > drop_thr; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / 亮度随上屏行带出：不依赖拍入口观测门（营地局也有） | footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] 上屏 至帧 %llu：%u 帧，掉帧 %u（丢弃 %u），p99 %.2f ms；footprint %.0f MiB；亮度 %.2f；温控 %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
@@ -3431,7 +3434,8 @@ static double srow(uint64_t f, const char *name, double dflt) {
 // Dropped-frame definition: on-screen present interval > 16.7×1.5 ms or −1; without a window (no on-screen present time) fall back to the present call interval
 static void slow_emit(uint64_t f) {
     static uint64_t judged, slow;
-    double pm = srow(f, "@presented_ms", 0), fr = srow(f, "@frame_ms", 0), lim = 1000.0 / 60 * 1.5;
+    double target_ms = g_active_period_ms >= 25.0 ? g_active_period_ms : (g_rt_period_ms >= 25.0 ? g_rt_period_ms : 1000.0 / 60.0);
+    double pm = srow(f, "@presented_ms", 0), fr = srow(f, "@frame_ms", 0), lim = target_ms * 1.5;
     int has = mtl_has_window(), bad = has ? (pm > lim || pm < 0) : fr > lim;
     if (has ? pm != 0 : fr != 0) judged++;
     if (bad) {
@@ -3739,6 +3743,12 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
       } }
     PSTEP(PS_WARM);
     present_cfg(o);
+    { uint64_t p_ns = present_period(o);
+      int sys_itv = g_game_sys ? *(const int32_t *)(uintptr_t)(g_game_sys + 0x248 + 5 * 4) : 0;
+      double p_ms = p_ns > 0 ? p_ns / 1e6 : 0;
+      if (sys_itv >= 2 && p_ms < 33.333) p_ms = 1000.0 / 60.0 * sys_itv;
+      else if (o->interval >= 2 && p_ms < 33.333) p_ms = 1000.0 / 60.0 * o->interval;
+      g_active_period_ms = p_ms > 0 ? p_ms : 1000.0 / 60.0; }
     uint64_t t0 = now_ns();
     PSTEP(PS_CFG);
     if (async_replay()) {   // TOTK: the present (and the replay frame number below) run on the translation thread, after this frame's submits

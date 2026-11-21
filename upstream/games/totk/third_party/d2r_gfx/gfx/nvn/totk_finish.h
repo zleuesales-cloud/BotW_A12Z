@@ -63,6 +63,18 @@ static id<MTLRenderPipelineState> fin_ps(MTLPixelFormat f, int pct) {
 /* One full-screen pass: in -> out (out's whole area). */
 static int fin_pass(id<MTLTexture> in, id<MTLTexture> out, int pct) {
     id<MTLRenderPipelineState> ps = fin_ps(out.pixelFormat, pct); if (!ps) return 0;
+    if (g_present_apple5) {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = out; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> re = (id<MTLRenderCommandEncoder>)enc_r_begin((MTL4RenderPassDescriptor *)rp);
+        if (!re) return 0;
+        [re setFragmentTexture:in atIndex:0];
+        [re setViewport:(MTLViewport){0, 0, (double)out.width, (double)out.height, 0, 1}];
+        [re setRenderPipelineState:ps];
+        [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        enc_r_end(re); es_reset();
+        return 1;
+    }
     int s = g_fin.slot = (g_fin.slot + 1) % 3;
     if (!g_fin.args[s]) { MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1; NSError *e = nil;
                           if (!(g_fin.args[s] = [g_dev newArgumentTableWithDescriptor:ad error:&e])) return 0; }

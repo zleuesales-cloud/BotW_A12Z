@@ -84,6 +84,12 @@ class WarmPolicyTests(unittest.TestCase):
         self.assertIn('![p isEqualToString:user]', kinds)              # the device's lists are not App lists
         self.assertIn('![p isEqualToString:pso_shared_path()]', kinds)
 
+    def test_apple5_uses_bounded_residency_policy(self):
+        source = (NVN / 'nvn_mtl.m').read_text()
+        mode = source[source.index('static int warm_resident_mode(void)'):source.index('static int warm_shared(void)')]
+        iphone = mode[mode.index('#if TARGET_OS_IPHONE'):mode.index('#elif defined(GAME_OOT)')]
+        self.assertIn('g_present_apple5 ? WARM_RESIDENT_TITLE_KINDS : WARM_RESIDENT_TITLE_LOCAL', iphone)
+
     def test_reverse_controls_detect_both_regressions(self):
         source = (NVN / 'nvn_warm_policy.h').read_text()
         cases = [

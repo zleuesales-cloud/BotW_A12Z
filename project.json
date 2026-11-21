@@ -21,9 +21,9 @@
     "d2r": "d2r-mobile/d2r-mobile@209dcd667fe937d23a153c88fd8fff97bdadc242",
     "spirv_cross": "KhronosGroup/SPIRV-Cross@57e4efcc84112abcd426dc5ec248b5339bee04f2"
   },
-  "existing_resources": "/Users/z-tek/Documents/NS/BotW_build",
-  "historical_source_missing": "/Users/z-tek/Documents/NS/BotW_A12Z_Native",
-  "device": "00008027-001C51D12262402E",
+  "existing_resources": "<BOTW_BUILD_DIR>",
+  "historical_source_missing": "<BOTW_A12Z_NATIVE_DIR>",
+  "device": "<YOUR_IPAD_UDID>",
   "note": "Candidate commits are audit inputs, not selected or validated dependency pins.",
   "upstream_archive_sha256": "1499f923d9d7c904757ec0a65acb3718282e1c0f9889a0de8a4f4bb66a211e33",
   "audit_findings": [
@@ -193,7 +193,7 @@
     "status": "PASS on physical iPad8,9 / Apple A12Z GPU",
     "bundle_id": "org.macnativegames.botw.a12z",
     "source_commit": "a8982c1",
-    "device": "00008027-001C51D12262402E",
+    "device": "<YOUR_IPAD_UDID>",
     "gpu_validation": "real production native queue/copy/fill/canonical virtual-pool path; 524288 bytes checked; no GPU errors reported",
     "first_failure": "runtime startup patch validation: embedded main+0x1266114 d2a89408, expected exported d0007208; running tables/modules loaded; re-export/relink pending",
     "macho_uuid": "BC99A66F-31C3-389C-8C92-C61D6E5B7623",

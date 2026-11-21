@@ -124,6 +124,7 @@ static id<MTL4ArgumentTable> cg_table(void) {
 }
 // 1 = done by the kernel, 0 = the caller blits (no kernel, or a cube the copy-out could not write)
 static int cg_copy_kernel(int out, const cg_group *g, const cg_temp *tp, __strong id<MTLTexture> *ct) {
+    if (g_present_apple5) return 0;
     id<MTLComputePipelineState> ps = cg_pso(out); if (!ps) return 0;
     if (out) for (int c = 0; c < g->n; c++) if (!(ct[c].usage & MTLTextureUsageShaderWrite)) { g_cg.blit_out++; return 0; }
     id<MTL4ComputeCommandEncoder> b = blit(); id<MTL4ArgumentTable> at = cg_table();

@@ -70,6 +70,7 @@ static const char *k_rx_msl =
 "  o.c = float4(hdr.read(uint2(cp)).rgb, 1); o.d = zproj(k.M, p, dep.read(uint2(cp)), W, H); return o;\n"
 "}\n";
 static int rx_setup(MTLPixelFormat fc, MTLPixelFormat fds) {
+    if (g_present_apple5) return 0;
     if (getenv("DM_RT_TEST_NOPSO")) return 0;   // 测试：当作这台设备建不出外推管线（验整局退回原画法） | Test: pretend this device cannot build the extrapolation pipeline (verifies the whole run falls back to the original drawing method)
     if (g_rx_pso1 && g_rx_fmt_c == fc && g_rx_fmt_ds == fds) return 1;
     static int failed; if (failed) return 0;

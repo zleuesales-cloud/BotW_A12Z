@@ -267,8 +267,8 @@ static void par_open_dir(id<MTLDevice> dev) {
     });
 }
 // The archive with this pipeline's code, or nil (no file yet; off).
-#if defined(GAME_OOT)
-/* Ocarina of Time: at most TOTK_PAR_OPEN_MAX (256) archive files stay open, least recently used out first; 0 keeps every
+#if defined(GAME_OOT) || TARGET_OS_IPHONE
+/* Ocarina of Time & iOS: at most TOTK_PAR_OPEN_MAX (256) archive files stay open, least recently used out first; 0 keeps every
    one (A/B). iOS: an open archive keeps its file mapped, one vnode each, and the iPad (A16) has about 11,400 for the whole
    device: with the device archive at one file per pipeline (19,750 files, 2026-11-13) the warm-up kept every one open and
    the system ended the game with jetsam reason vnode-limit (JetsamEvent-2026-11-13-090255, 735 MB resident). The Mac

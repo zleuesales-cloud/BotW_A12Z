@@ -198,6 +198,10 @@ id<MTLResidencySet> taa_residency(void) { return g.rs; }
 static int setup(id<MTLDevice> dev) {
     if (g.dev) return 1;
     if (g.failed) return 0;
+    if (![dev supportsFamily:MTLGPUFamilyApple6]) {
+        TLOG("not available on Apple5 GPU (requires Metal 4 / Apple6+)");
+        g.failed = 1; return 0;
+    }
     NSError *e = nil;
     g.comp = [dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
     MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.label = @"TOTK TAA";

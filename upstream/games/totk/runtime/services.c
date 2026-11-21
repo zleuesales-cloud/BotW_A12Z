@@ -35,7 +35,7 @@
    down to 4 GiB that fits is chosen at startup; the game maps about 3.3 GiB of it. */
 #if TARGET_OS_IPHONE
 #define ALIAS_DEFAULT_GIB 16
-#define ALIAS_MIN_GIB 4ULL
+#define ALIAS_MIN_GIB 1ULL
 #else
 #define ALIAS_DEFAULT_GIB 64
 #endif

@@ -102,6 +102,7 @@ static int shared_objects(id<MTLDevice> dev) {
     int ok = 1; NSError *e = nil;
     if (!g_dev) g_dev = dev;
     if (g_dev != dev) { ULOG("textures of another device: game's own upscale stays"); ok = 0; }
+    if (ok && ![g_dev supportsFamily:MTLGPUFamilyApple6]) { ULOG("Apple5 GPU has no Metal 4 MetalFX spatial scaler: game's own upscale stays"); ok = 0; }
     if (ok && !g_rs) { g_rs = [g_dev newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&e]; if (!g_rs) { ULOG("residency set: %s", e.localizedDescription.UTF8String); ok = 0; } }
     if (ok && ![MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) { ULOG("this GPU has no Metal 4 MetalFX spatial scaler: game's own upscale stays"); ok = 0; }
     if (ok && !g_comp) { g_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e]; if (!g_comp) { ULOG("MTL4 compiler: %s", e.localizedDescription.UTF8String); ok = 0; } }
